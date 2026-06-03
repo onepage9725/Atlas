@@ -7,6 +7,9 @@ const roleOptions = ["super_admin", "admin", "leader", "agent"] as const;
 const createRoleOptions = ["super_admin", "admin", "agent"] as const;
 const memberRankOptions = ["agent", "pre_leader", "leader"] as const;
 
+const getDefaultMemberRankForRole = (role: string | null | undefined): (typeof memberRankOptions)[number] =>
+  role === "super_admin" ? "leader" : "agent";
+
 type UserProfile = RankProfile & {
   name: string | null;
   email: string | null;
@@ -19,12 +22,19 @@ type UserProfile = RankProfile & {
   avatar_zoom: number | null;
 };
 
-const shouldAutoManageRank = (profile: Pick<UserProfile, "role" | "rank">) =>
-  profile.role === "agent" ||
-  profile.role === "leader" ||
-  profile.rank === "agent" ||
-  profile.rank === "pre_leader" ||
-  profile.rank === "leader";
+const shouldAutoManageRank = (profile: Pick<UserProfile, "role" | "rank">) => {
+  if (profile.role === "admin" || profile.role === "super_admin") {
+    return false;
+  }
+
+  return (
+    profile.role === "agent" ||
+    profile.role === "leader" ||
+    profile.rank === "agent" ||
+    profile.rank === "pre_leader" ||
+    profile.rank === "leader"
+  );
+};
 
 const isLeaderProfile = (profile: Pick<UserProfile, "role" | "rank"> | null | undefined) =>
   Boolean(profile && (profile.rank === "leader" || profile.role === "leader"));
@@ -404,7 +414,11 @@ export function UsersForm() {
     setEditAvatarFile(null);
     setEditAvatarName("");
     setEditRole((profile.role ?? "admin") as (typeof roleOptions)[number]);
-    setEditRank((profile.rank === "pre_leader" || profile.rank === "leader" ? profile.rank : "agent") as (typeof memberRankOptions)[number]);
+    setEditRank(
+      (profile.rank === "pre_leader" || profile.rank === "leader"
+        ? profile.rank
+        : getDefaultMemberRankForRole(profile.role)) as (typeof memberRankOptions)[number]
+    );
     setEditRecruitById(profile.recruit_by ?? "");
     setEditPersonalPoints((profile.personal_points ?? 0).toString());
     setEditGroupPoints((profile.group_points ?? 0).toString());
@@ -424,7 +438,7 @@ export function UsersForm() {
     setEditAvatarFile(null);
     setEditAvatarName("");
     setEditRole("admin");
-    setEditRank("agent");
+    setEditRank(getDefaultMemberRankForRole("admin"));
     setEditRecruitById("");
     setEditPersonalPoints("");
     setEditGroupPoints("");
@@ -482,7 +496,7 @@ export function UsersForm() {
       const updatePayload: Record<string, unknown> = {
         name: editName,
         role: editRole,
-        rank: editRole === "super_admin" || editRole === "admin" ? null : editRank,
+        rank: editRole === "super_admin" ? "leader" : editRole === "admin" ? null : editRank,
         recruit_by:
           editRole === "agent" || editRole === "leader" ? editRecruitById || null : null,
         personal_points: editRole === "agent" || editRole === "leader" ? parsedPersonalPoints : 0,
@@ -652,7 +666,7 @@ export function UsersForm() {
     setSuccess(null);
 
     const nextRecruitBy = shouldSelectRecruiter ? recruitById || null : null;
-    const derivedRank = role === "super_admin" || role === "admin" ? null : shouldRequireRank ? rank : null;
+    const derivedRank = role === "super_admin" ? "leader" : role === "admin" ? null : shouldRequireRank ? rank : null;
     const createdEmail = email;
 
     const createUserPayload: Record<string, unknown> = {
@@ -731,7 +745,7 @@ export function UsersForm() {
     setEmail("");
     setPassword("");
     setRole("admin");
-    setRank("agent");
+    setRank(getDefaultMemberRankForRole("admin"));
     setRecruitById("");
     setPersonalPoints("");
     setGroupPoints("");
