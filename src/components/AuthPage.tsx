@@ -44,7 +44,12 @@ export function AuthPage() {
     <div className="min-h-screen bg-[var(--color-body)] flex items-center justify-center px-6">
       <div className="w-full max-w-md bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
         <div className="mb-6 text-center">
-          <h1 className="text-2xl font-bold text-gray-900">Atlas ERP</h1>
+          <img
+            src="/AOGfavicon.png"
+            alt="ATLAS OLSEN logo"
+            className="mx-auto mb-4 h-16 w-16 object-contain"
+          />
+          <h1 className="text-2xl font-bold text-gray-900">ATLAS OLSEN</h1>
           <p className="text-sm text-gray-500 mt-2">Sign in to your account</p>
         </div>
 
