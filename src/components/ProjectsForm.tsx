@@ -238,7 +238,9 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [selectedProject, setSelectedProject] = useState<ProjectRecord | null>(null);
+  const [pendingDeleteProject, setPendingDeleteProject] = useState<ProjectRecord | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [coverImageFile, setCoverImageFile] = useState<File | null>(null);
   const [attachment1File, setAttachment1File] = useState<File | null>(null);
@@ -1052,19 +1054,36 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
       return;
     }
 
-    const isConfirmed = window.confirm(
-      "Delete this project? If the project is deleted successfully, the cover image and all project attachments will also be deleted from Supabase storage."
-    );
+    setError(null);
+    setIsDeletingProject(true);
 
-    if (!isConfirmed) {
+    const { count: linkedCaseCount, error: linkedCaseError } = await supabase
+      .from("sales_cases")
+      .select("id", { count: "exact", head: true })
+      .eq("project_id", project.id);
+
+    if (linkedCaseError) {
+      setError(linkedCaseError.message);
+      setIsDeletingProject(false);
       return;
     }
 
-    setError(null);
+    if ((linkedCaseCount ?? 0) > 0) {
+      setError(
+        `This project cannot be deleted because ${linkedCaseCount} sales case${linkedCaseCount === 1 ? " is" : "s are"} still linked to it. Remove or reassign those cases first.`
+      );
+      setIsDeletingProject(false);
+      return;
+    }
 
     const { error: deleteError } = await supabase.from("projects").delete().eq("id", project.id);
     if (deleteError) {
-      setError(deleteError.message);
+      if (deleteError.code === "23503") {
+        setError("This project cannot be deleted because other records are still linked to it. Remove those linked records first.");
+      } else {
+        setError(deleteError.message);
+      }
+      setIsDeletingProject(false);
       return;
     }
 
@@ -1088,6 +1107,8 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
       if (selectedProject?.id === project.id) {
         setSelectedProject(null);
       }
+      setPendingDeleteProject(null);
+      setIsDeletingProject(false);
       return;
     }
 
@@ -1099,6 +1120,8 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
     if (selectedProject?.id === project.id) {
       setSelectedProject(null);
     }
+    setPendingDeleteProject(null);
+    setIsDeletingProject(false);
   };
 
   return (
@@ -1223,7 +1246,8 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
-                        void handleDelete(project);
+                        setError(null);
+                        setPendingDeleteProject(project);
                       }}
                       className="inline-flex items-center gap-1 rounded-md border border-red-200 px-3 py-1.5 text-xs text-red-600 hover:text-red-700"
                     >
@@ -2112,6 +2136,41 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                   )}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingDeleteProject && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-gray-100 bg-white shadow-2xl">
+            <div className="border-b border-gray-100 px-6 py-5">
+              <h3 className="text-lg font-semibold text-gray-900">Delete project?</h3>
+              <p className="mt-2 text-sm leading-6 text-gray-500">
+                This will permanently remove
+                <span className="font-medium text-gray-800"> {pendingDeleteProject.project_name}</span>
+                . The cover image and project attachments will be removed together with the project.
+              </p>
+              {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteProject(null)}
+                disabled={isDeletingProject}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDelete(pendingDeleteProject)}
+                disabled={isDeletingProject}
+                className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                <Trash2 className="h-4 w-4" />
+                {isDeletingProject ? "Deleting..." : "Delete Project"}
+              </button>
             </div>
           </div>
         </div>
