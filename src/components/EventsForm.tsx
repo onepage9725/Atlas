@@ -232,7 +232,7 @@ export function EventsForm({ userId }: { userId: string }) {
 
   return (
     <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">
             {editingId ? "Edit Event" : "Create Event"}

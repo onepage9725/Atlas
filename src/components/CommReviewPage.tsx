@@ -282,7 +282,7 @@ export function CommReviewPage({ userId }: { userId: string }) {
 
   return (
     <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Cases Approval</h2>
           <p className="text-gray-500 text-sm mt-1">

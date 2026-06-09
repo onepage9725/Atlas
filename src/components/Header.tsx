@@ -167,7 +167,7 @@ export function Header({
           </button>
 
           {isNotificationOpen && (
-            <div className="absolute right-0 top-10 z-30 w-[360px] overflow-hidden rounded-xl border border-gray-100 bg-white shadow-xl">
+            <div className="absolute -right-2 top-10 z-30 w-[calc(100vw-2rem)] max-w-[360px] sm:right-0 sm:w-[360px] overflow-hidden rounded-xl border border-gray-100 bg-white shadow-xl">
               <div className="border-b border-gray-100 px-4 py-3">
                 <p className="text-sm font-semibold text-gray-900">Notifications</p>
               </div>
