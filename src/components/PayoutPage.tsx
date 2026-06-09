@@ -1105,16 +1105,16 @@ export function PayoutPage({ userId }: { userId: string }) {
           <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
-                <th className="py-2">Member</th>
-                <th className="py-2">Project &amp; Unit</th>
-                <th className="py-2">SPA (RM)</th>
-                <th className="py-2">Nett (RM)</th>
-                <th className="py-2">Commission %</th>
-                <th className="py-2">Pre Leader Override %</th>
-                <th className="py-2">Leader Override %</th>
-                <th className="py-2">Payout Comm (RM)</th>
-                <th className="py-2">Payout Date</th>
-                <th className="py-2 text-right">Action</th>
+                <th className="px-6 py-2">Member</th>
+                <th className="px-6 py-2">Project &amp; Unit</th>
+                <th className="px-6 py-2">SPA (RM)</th>
+                <th className="px-6 py-2">Nett (RM)</th>
+                <th className="px-6 py-2">Commission %</th>
+                <th className="px-6 py-2">Pre Leader Override %</th>
+                <th className="px-6 py-2">Leader Override %</th>
+                <th className="px-6 py-2">Payout Comm (RM)</th>
+                <th className="px-6 py-2">Payout Date</th>
+                <th className="px-6 py-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -1126,13 +1126,13 @@ export function PayoutPage({ userId }: { userId: string }) {
 
                 return (
                   <tr key={row.id} className="border-b border-gray-50">
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       <div className="font-medium text-gray-800">{row.memberLabel}</div>
                       {row.payoutLabel && (
                         <div className="text-xs text-amber-700">{row.payoutLabel}</div>
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       <div className="font-medium text-gray-800">
                         {row.project?.project_name || "-"}
                       </div>
@@ -1140,18 +1140,18 @@ export function PayoutPage({ userId }: { userId: string }) {
                         {row.record?.unit_number ? `Unit ${row.record.unit_number}` : "-"}
                       </div>
                     </td>
-                    <td className="py-3 text-gray-600">{formatAmount(row.spaPrice)}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(row.nettPrice)}</td>
-                    <td className="py-3 text-gray-600">{formatPercentage(row.commissionPercentage)}</td>
-                    <td className="py-3 text-gray-600">{formatPercentage(row.preLeaderOverridePercentage)}</td>
-                    <td className="py-3 text-gray-600">{formatPercentage(row.leaderOverridePercentage)}</td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(row.spaPrice)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(row.nettPrice)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatPercentage(row.commissionPercentage)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatPercentage(row.preLeaderOverridePercentage)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatPercentage(row.leaderOverridePercentage)}</td>
+                    <td className="px-6 py-3 text-gray-600">
                       {formatAmount(row.rowType === "company" ? row.totalAmount : row.amount)}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {row.paidAt ? new Date(row.paidAt).toLocaleDateString() : "-"}
                     </td>
-                    <td className="py-3">
+                    <td className="px-6 py-3">
                       {isMemberRow && payout ? (
                         <div className="flex items-center justify-end gap-2">
                           <button

@@ -542,17 +542,17 @@ export function RankingPage({ userId }: RankingPageProps) {
             <table className="w-full text-sm whitespace-nowrap">
               <thead>
                 <tr className="border-b border-gray-100 text-left text-gray-500">
-                  <th className="py-2">Rank</th>
-                  <th className="py-2">Member</th>
-                  <th className="py-2">Current Rank</th>
-                  <th className="py-2">{selectedMetricLabel} (RM)</th>
+                  <th className="px-6 py-2">Rank</th>
+                  <th className="px-6 py-2">Member</th>
+                  <th className="px-6 py-2">Current Rank</th>
+                  <th className="px-6 py-2">{selectedMetricLabel} (RM)</th>
                 </tr>
               </thead>
               <tbody>
                 {sortedRankingRows.map((row, index) => (
                   <tr key={row.profile.id} className="border-b border-gray-50">
-                    <td className="py-3 font-semibold text-gray-700">#{index + 1}</td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 font-semibold text-gray-700">#{index + 1}</td>
+                    <td className="px-6 py-3 text-gray-600">
                       <div className="flex items-center gap-3">
                         <div className="h-10 w-10 rounded-full border border-gray-100 bg-gray-50" style={getAvatarStyle(row.profile)} />
                         <div>
@@ -561,8 +561,8 @@ export function RankingPage({ userId }: RankingPageProps) {
                         </div>
                       </div>
                     </td>
-                    <td className="py-3 text-gray-600">{formatRankLabel(row.rankCategory)}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(getMetricValue(row))}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatRankLabel(row.rankCategory)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(getMetricValue(row))}</td>
                   </tr>
                 ))}
               </tbody>

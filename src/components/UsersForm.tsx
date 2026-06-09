@@ -1002,22 +1002,22 @@ export function UsersForm() {
           <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
-                <th className="py-2">Profile</th>
-                <th className="py-2">Bank Name</th>
-                <th className="py-2">Account Number</th>
-                <th className="py-2">Member Rank</th>
-                <th className="py-2">Personal</th>
-                <th className="py-2">Group</th>
-                <th className="py-2">Recruit By</th>
-                <th className="py-2">Leader</th>
-                <th className="py-2">Status</th>
-                <th className="py-2 text-right">Actions</th>
+                <th className="px-6 py-2">Profile</th>
+                <th className="px-6 py-2">Bank Name</th>
+                <th className="px-6 py-2">Account Number</th>
+                <th className="px-6 py-2">Member Rank</th>
+                <th className="px-6 py-2">Personal</th>
+                <th className="px-6 py-2">Group</th>
+                <th className="px-6 py-2">Recruit By</th>
+                <th className="px-6 py-2">Leader</th>
+                <th className="px-6 py-2">Status</th>
+                <th className="px-6 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredProfiles.map((profile) => (
                 <tr key={profile.id} className="border-b border-gray-50">
-                  <td className="py-3">
+                  <td className="px-6 py-3">
                     <div className="flex items-center gap-3">
                       <div
                         className="h-8 w-8 rounded-full border border-gray-100 bg-gray-50"
@@ -1033,9 +1033,9 @@ export function UsersForm() {
                       </span>
                     </div>
                   </td>
-                  <td className="py-3 text-gray-600">{profile.bank_name || "-"}</td>
-                  <td className="py-3 text-gray-600">{profile.bank_account_number || "-"}</td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">{profile.bank_name || "-"}</td>
+                  <td className="px-6 py-3 text-gray-600">{profile.bank_account_number || "-"}</td>
+                  <td className="px-6 py-3 text-gray-600">
                     {shouldAutoManageRank(profile) ? (
                       <div>
                         <div>{formatRankLabel(memberRankSummaries.get(profile.id)?.rank ?? profile.rank)}</div>
@@ -1049,23 +1049,23 @@ export function UsersForm() {
                       formatRankLabel(profile.rank)
                     )}
                   </td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">
                     {shouldAutoManageRank(profile)
                       ? formatPointValue(memberRankSummaries.get(profile.id)?.personalPoints ?? profile.personal_points)
                       : "-"}
                   </td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">
                     {shouldAutoManageRank(profile)
                       ? formatPointValue(memberRankSummaries.get(profile.id)?.groupPoints ?? profile.group_points)
                       : "-"}
                   </td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">
                     {getProfileLabel(profile.recruit_by)}
                   </td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">
                     {getProfileLabel(getLeaderProfileId(profile))}
                   </td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">
                     <span
                       className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${
                         (profile.is_active ?? true)
@@ -1076,7 +1076,7 @@ export function UsersForm() {
                       {(profile.is_active ?? true) ? "Active" : "Inactive"}
                     </span>
                   </td>
-                  <td className="py-3">
+                  <td className="px-6 py-3">
                     <div className="flex items-center justify-end gap-2">
                       <button
                         type="button"

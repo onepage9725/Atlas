@@ -756,17 +756,17 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
           <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
-                <th className="py-2">Created Date</th>
-                <th className="py-2">Booking Date</th>
-                <th className="py-2">Project</th>
-                <th className="py-2">Unit</th>
-                <th className="py-2">SPA Price (RM)</th>
-                <th className="py-2">Nett Price (RM)</th>
-                <th className="py-2">Created By</th>
-                <th className="py-2">Booking Form</th>
-                <th className="py-2">Status</th>
-                <th className="py-2">Commission</th>
-                <th className="py-2 text-right">Actions</th>
+                <th className="px-6 py-2">Created Date</th>
+                <th className="px-6 py-2">Booking Date</th>
+                <th className="px-6 py-2">Project</th>
+                <th className="px-6 py-2">Unit</th>
+                <th className="px-6 py-2">SPA Price (RM)</th>
+                <th className="px-6 py-2">Nett Price (RM)</th>
+                <th className="px-6 py-2">Created By</th>
+                <th className="px-6 py-2">Booking Form</th>
+                <th className="px-6 py-2">Status</th>
+                <th className="px-6 py-2">Commission</th>
+                <th className="px-6 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -796,21 +796,21 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
                     key={row.id}
                     className={`border-b border-gray-50 ${isPersonallyRelatedCase ? "bg-blue-50/60" : "bg-white"}`}
                   >
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {row.rowType === "top_up" ? new Date(row.createdAt).toLocaleDateString() : createdAt ? createdAt.toLocaleDateString() : "-"}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {bookingDate ? bookingDate.toLocaleDateString() : "-"}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       <div>{projectName}</div>
                       {topUpLabel && <div className="text-xs text-amber-700">{topUpLabel}</div>}
                     </td>
-                    <td className="py-3 text-gray-600">{record.unit_number || "-"}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(record.spa_price)}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(record.nett_price)}</td>
-                    <td className="py-3 text-gray-600">{creatorLabel}</td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">{record.unit_number || "-"}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(record.spa_price)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(record.nett_price)}</td>
+                    <td className="px-6 py-3 text-gray-600">{creatorLabel}</td>
+                    <td className="px-6 py-3 text-gray-600">
                       {record.booking_form_url ? (
                         <a
                           href={record.booking_form_url}
@@ -824,7 +824,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
                         "-"
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       <span
                         className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${getCaseStatusClasses(displayStatus)}`}
                       >
@@ -845,8 +845,8 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
                         </div>
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">{formatCurrency(displayCommission)}</td>
-                    <td className="py-3">
+                    <td className="px-6 py-3 text-gray-600">{formatCurrency(displayCommission)}</td>
+                    <td className="px-6 py-3">
                       <div className="flex items-center justify-end gap-2">
                         {row.rowType === "case" && isCreator && !isLocked ? (
                           <>

@@ -307,16 +307,16 @@ export function CommReviewPage({ userId }: { userId: string }) {
           <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
-                <th className="py-2">Created Date</th>
-                <th className="py-2">Booking Date</th>
-                <th className="py-2">Project Unit</th>
-                <th className="py-2">SPA Price (RM)</th>
-                <th className="py-2">Nett Price (RM)</th>
-                <th className="py-2">Booking Form</th>
-                <th className="py-2">LO Draft</th>
-                <th className="py-2">Company Comm (RM)</th>
-                <th className="py-2">Total Payout (RM)</th>
-                <th className="py-2 text-right">Action</th>
+                <th className="px-6 py-2">Created Date</th>
+                <th className="px-6 py-2">Booking Date</th>
+                <th className="px-6 py-2">Project Unit</th>
+                <th className="px-6 py-2">SPA Price (RM)</th>
+                <th className="px-6 py-2">Nett Price (RM)</th>
+                <th className="px-6 py-2">Booking Form</th>
+                <th className="px-6 py-2">LO Draft</th>
+                <th className="px-6 py-2">Company Comm (RM)</th>
+                <th className="px-6 py-2">Total Payout (RM)</th>
+                <th className="px-6 py-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -329,13 +329,13 @@ export function CommReviewPage({ userId }: { userId: string }) {
 
                 return (
                   <tr key={record.id} className="border-b border-gray-50">
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {createdAt ? createdAt.toLocaleDateString() : "-"}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {bookingDate ? bookingDate.toLocaleDateString() : "-"}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       <div className="font-medium text-gray-800">
                         {project?.project_name || "-"}
                       </div>
@@ -343,9 +343,9 @@ export function CommReviewPage({ userId }: { userId: string }) {
                         {record.unit_number ? `Unit ${record.unit_number}` : "-"}
                       </div>
                     </td>
-                    <td className="py-3 text-gray-600">{formatAmount(record.spa_price)}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(record.nett_price)}</td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(record.spa_price)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(record.nett_price)}</td>
+                    <td className="px-6 py-3 text-gray-600">
                       {record.booking_form_url ? (
                         <a
                           href={record.booking_form_url}
@@ -359,7 +359,7 @@ export function CommReviewPage({ userId }: { userId: string }) {
                         "-"
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {record.lo_draft_url ? (
                         <a
                           href={record.lo_draft_url}
@@ -373,9 +373,9 @@ export function CommReviewPage({ userId }: { userId: string }) {
                         "-"
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">{formatAmount(companyCommission)}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(totalPayout)}</td>
-                    <td className="py-3">
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(companyCommission)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(totalPayout)}</td>
+                    <td className="px-6 py-3">
                       <div className="flex items-center justify-end gap-2">
                         <button
                           type="button"

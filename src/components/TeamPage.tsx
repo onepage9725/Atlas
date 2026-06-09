@@ -865,31 +865,31 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
           <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="border-b border-gray-100 text-left text-gray-500">
-                <th className="py-2">Member</th>
-                <th className="py-2">Created Date</th>
-                <th className="py-2">Booking Date</th>
-                <th className="py-2">Project</th>
-                <th className="py-2">Unit</th>
-                <th className="py-2">SPA Price (RM)</th>
-                <th className="py-2">Nett Price (RM)</th>
-                <th className="py-2">Created By</th>
-                <th className="py-2">Booking Form</th>
-                <th className="py-2">Status</th>
-                <th className="py-2 text-right">Actions</th>
+                <th className="px-6 py-2">Member</th>
+                <th className="px-6 py-2">Created Date</th>
+                <th className="px-6 py-2">Booking Date</th>
+                <th className="px-6 py-2">Project</th>
+                <th className="px-6 py-2">Unit</th>
+                <th className="px-6 py-2">SPA Price (RM)</th>
+                <th className="px-6 py-2">Nett Price (RM)</th>
+                <th className="px-6 py-2">Created By</th>
+                <th className="px-6 py-2">Booking Form</th>
+                <th className="px-6 py-2">Status</th>
+                <th className="px-6 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredTeamCaseRows.map((row) => (
                 <tr key={row.id} className="border-b border-gray-50">
-                  <td className="py-3 text-gray-700">{row.memberLabels}</td>
-                  <td className="py-3 text-gray-600">{row.createdAt ? row.createdAt.toLocaleDateString() : "-"}</td>
-                  <td className="py-3 text-gray-600">{row.bookingDate}</td>
-                  <td className="py-3 text-gray-600">{row.projectName}</td>
-                  <td className="py-3 text-gray-600">{row.unitNumber}</td>
-                  <td className="py-3 text-gray-600">{formatAmount(row.spaPrice)}</td>
-                  <td className="py-3 text-gray-600">{formatAmount(row.nettPrice)}</td>
-                  <td className="py-3 text-gray-600">{row.createdByLabel}</td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-700">{row.memberLabels}</td>
+                  <td className="px-6 py-3 text-gray-600">{row.createdAt ? row.createdAt.toLocaleDateString() : "-"}</td>
+                  <td className="px-6 py-3 text-gray-600">{row.bookingDate}</td>
+                  <td className="px-6 py-3 text-gray-600">{row.projectName}</td>
+                  <td className="px-6 py-3 text-gray-600">{row.unitNumber}</td>
+                  <td className="px-6 py-3 text-gray-600">{formatAmount(row.spaPrice)}</td>
+                  <td className="px-6 py-3 text-gray-600">{formatAmount(row.nettPrice)}</td>
+                  <td className="px-6 py-3 text-gray-600">{row.createdByLabel}</td>
+                  <td className="px-6 py-3 text-gray-600">
                     {row.bookingFormUrl ? (
                       <a
                         href={row.bookingFormUrl}
@@ -903,12 +903,12 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
                       "-"
                     )}
                   </td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">
                     <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${getCaseStatusClasses(row.status)}`}>
                       {row.status}
                     </span>
                   </td>
-                  <td className="py-3">
+                  <td className="px-6 py-3">
                     <div className="flex items-center justify-end gap-2">
                       <button
                         type="button"

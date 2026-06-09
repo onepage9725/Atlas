@@ -382,25 +382,25 @@ export function EventsForm({ userId }: { userId: string }) {
           <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
-                <th className="py-2">Event</th>
-                <th className="py-2">Dates</th>
-                <th className="py-2">Image</th>
-                <th className="py-2 text-right">Actions</th>
+                <th className="px-6 py-2">Event</th>
+                <th className="px-6 py-2">Dates</th>
+                <th className="px-6 py-2">Image</th>
+                <th className="px-6 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {events.map((event) => (
                 <tr key={event.id} className="border-b border-gray-50">
-                  <td className="py-3">
+                  <td className="px-6 py-3">
                     <div className="font-medium text-gray-900">{event.event_name}</div>
                     <div className="text-xs text-gray-500">
                       {event.description || "No description"}
                     </div>
                   </td>
-                  <td className="py-3 text-gray-600">
+                  <td className="px-6 py-3 text-gray-600">
                     {event.start_date || "-"} - {event.end_date || "-"}
                   </td>
-                  <td className="py-3">
+                  <td className="px-6 py-3">
                     {event.image_url ? (
                       <img
                         src={event.image_url}
@@ -411,7 +411,7 @@ export function EventsForm({ userId }: { userId: string }) {
                       <span className="text-xs text-gray-400">No image</span>
                     )}
                   </td>
-                  <td className="py-3">
+                  <td className="px-6 py-3">
                     <div className="flex items-center justify-end gap-2">
                       <button
                         type="button"

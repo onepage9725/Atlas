@@ -682,19 +682,19 @@ export function ManageCases({ userId }: ManageCasesProps) {
           <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
-                <th className="py-2">Created Date</th>
-                <th className="py-2">Booking Date</th>
-                <th className="py-2">Project</th>
-                <th className="py-2">Unit</th>
-                <th className="py-2">SPA Price (RM)</th>
-                <th className="py-2">Nett Price (RM)</th>
-                <th className="py-2">Created By</th>
-                <th className="py-2">Booking Form</th>
-                <th className="py-2">Case Status</th>
-                <th className="py-2">Delete Request</th>
-                <th className="py-2">Edited</th>
-                <th className="py-2">Reviewed</th>
-                <th className="py-2 text-right">Actions</th>
+                <th className="px-6 py-2">Created Date</th>
+                <th className="px-6 py-2">Booking Date</th>
+                <th className="px-6 py-2">Project</th>
+                <th className="px-6 py-2">Unit</th>
+                <th className="px-6 py-2">SPA Price (RM)</th>
+                <th className="px-6 py-2">Nett Price (RM)</th>
+                <th className="px-6 py-2">Created By</th>
+                <th className="px-6 py-2">Booking Form</th>
+                <th className="px-6 py-2">Case Status</th>
+                <th className="px-6 py-2">Delete Request</th>
+                <th className="px-6 py-2">Edited</th>
+                <th className="px-6 py-2">Reviewed</th>
+                <th className="px-6 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -740,18 +740,18 @@ export function ManageCases({ userId }: ManageCasesProps) {
 
                 return (
                   <tr key={record.id} className="border-b border-gray-50">
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {createdAt ? createdAt.toLocaleDateString() : "-"}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {bookingDate ? bookingDate.toLocaleDateString() : "-"}
                     </td>
-                    <td className="py-3 text-gray-600">{projectName}</td>
-                    <td className="py-3 text-gray-600">{record.unit_number || "-"}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(record.spa_price)}</td>
-                    <td className="py-3 text-gray-600">{formatAmount(record.nett_price)}</td>
-                    <td className="py-3 text-gray-600">{creator}</td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">{projectName}</td>
+                    <td className="px-6 py-3 text-gray-600">{record.unit_number || "-"}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(record.spa_price)}</td>
+                    <td className="px-6 py-3 text-gray-600">{formatAmount(record.nett_price)}</td>
+                    <td className="px-6 py-3 text-gray-600">{creator}</td>
+                    <td className="px-6 py-3 text-gray-600">
                       {record.booking_form_url ? (
                         <a
                           href={record.booking_form_url}
@@ -765,14 +765,14 @@ export function ManageCases({ userId }: ManageCasesProps) {
                         "-"
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       <span
                         className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${getCaseStatusClasses(displayStatus)}`}
                       >
                         {displayStatus}
                       </span>
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {record.delete_requested ? (
                         <div>
                           <div className="text-xs font-medium text-red-600">Requested</div>
@@ -782,7 +782,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
                         "-"
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {editedAt ? (
                         <div>
                           <div className="text-xs font-medium text-gray-700">
@@ -794,7 +794,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
                         "-"
                       )}
                     </td>
-                    <td className="py-3 text-gray-600">
+                    <td className="px-6 py-3 text-gray-600">
                       {reviewedAt ? (
                         <div>
                           <div className="text-xs font-medium text-gray-700">
@@ -806,7 +806,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
                         "-"
                       )}
                     </td>
-                    <td className="py-3">
+                    <td className="px-6 py-3">
                       <div className="flex items-center justify-end gap-2">
                         {status === "Claimable" && !record.commission_review_sent_at && (
                           <button
