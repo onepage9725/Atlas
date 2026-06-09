@@ -862,7 +862,7 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="border-b border-gray-100 text-left text-gray-500">
                 <th className="py-2">Member</th>

@@ -379,7 +379,7 @@ export function EventsForm({ userId }: { userId: string }) {
           )}
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
                 <th className="py-2">Event</th>

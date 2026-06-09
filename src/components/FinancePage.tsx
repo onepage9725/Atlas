@@ -1132,7 +1132,7 @@ export function FinancePage({ userId, role }: FinancePageProps) {
 
       <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
         <div className="overflow-x-auto overflow-y-visible">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-100">
                 <th className="py-2">Date</th>
