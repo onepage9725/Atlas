@@ -4,6 +4,7 @@ import { supabase } from "../lib/supabaseClient";
 
 interface ProfilePageProps {
   userId: string;
+  role: string | null;
   onProfileUpdated: (
     name: string | null,
     avatarUrl: string | null,
@@ -13,7 +14,7 @@ interface ProfilePageProps {
   ) => void;
 }
 
-export function ProfilePage({ userId, onProfileUpdated }: ProfilePageProps) {
+export function ProfilePage({ userId, role, onProfileUpdated }: ProfilePageProps) {
   const [name, setName] = useState("");
   const [bankName, setBankName] = useState("");
   const [bankAccountNumber, setBankAccountNumber] = useState("");
@@ -29,6 +30,8 @@ export function ProfilePage({ userId, onProfileUpdated }: ProfilePageProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  const canEditName = role === "admin" || role === "super_admin";
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -206,6 +209,7 @@ export function ProfilePage({ userId, onProfileUpdated }: ProfilePageProps) {
             onChange={(event) => setName(event.target.value)}
             placeholder="Your name"
             className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+            disabled={!canEditName}
           />
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

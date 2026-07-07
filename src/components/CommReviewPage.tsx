@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { buildPayoutRowsForCommissionStructure, type ComputedPayoutRow } from "../lib/salesCasePayouts";
+import {
+  buildCommissionStructureByTotalPercentage,
+  buildPayoutRowsForCommissionStructure,
+  type ComputedPayoutRow,
+} from "../lib/salesCasePayouts";
 import { fetchNotificationProfiles, getNotificationProfileLabel, notifyCaseAudience } from "../lib/notifications";
 import { supabase } from "../lib/supabaseClient";
-import { getCaseCommissionStructure } from "../lib/commissionStructures";
+import {
+  getCaseCommissionStructure,
+  getDirectCommissionPercentage,
+  getHoldingCommissionPercentage,
+} from "../lib/commissionStructures";
 import {
   normalizeCaseStatus,
   SalesCaseModal,
@@ -91,16 +99,14 @@ export function CommReviewPage({ userId }: { userId: string }) {
     }
 
     const rawCases = (data as SalesCaseRecord[]) ?? [];
-    setCases(
-      rawCases.filter((record) => normalizeCaseStatus(record.status) === "Claimable")
-    );
+    setCases(rawCases.filter((record) => normalizeCaseStatus(record.status) === "Claimable"));
   };
 
   const fetchProjects = async () => {
     const { data, error: fetchError } = await supabase
       .from("projects")
       .select(
-        "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, commission_structures, default_commission_structure_id"
+        "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, direct_commission, holding_commission, commission_structures, default_commission_structure_id"
       )
       .order("created_at", { ascending: false });
 
@@ -133,14 +139,37 @@ export function CommReviewPage({ userId }: { userId: string }) {
     fetchProfiles();
   }, []);
 
-  const buildPayoutRows = (record: SalesCaseRecord, project: ProjectOption | null) => {
+  const buildPayoutRows = (
+    record: SalesCaseRecord,
+    project: ProjectOption | null,
+    mode: "direct" | "holding" = "direct",
+  ) => {
     const commissionStructure = getCaseCommissionStructure(record, project);
 
     if (!project) {
       return [] as ComputedPayoutRow[];
     }
 
-    return buildPayoutRowsForCommissionStructure(record, commissionStructure, profileMap);
+    if (!commissionStructure) {
+      return [] as ComputedPayoutRow[];
+    }
+
+    const directPercentage = getDirectCommissionPercentage(commissionStructure);
+    const holdingPercentage = getHoldingCommissionPercentage(commissionStructure);
+    const targetPercentage = mode === "direct" ? directPercentage : holdingPercentage;
+
+    const scopedStructure = buildCommissionStructureByTotalPercentage(
+      commissionStructure,
+      targetPercentage,
+      `${commissionStructure.id}-${mode}`,
+      `${commissionStructure.label ?? "Default"} (${mode})`,
+    );
+
+    if (!scopedStructure) {
+      return [] as ComputedPayoutRow[];
+    }
+
+    return buildPayoutRowsForCommissionStructure(record, scopedStructure, profileMap);
   };
 
   const handleRevert = async (record: SalesCaseRecord) => {
@@ -182,7 +211,8 @@ export function CommReviewPage({ userId }: { userId: string }) {
     setIsApprovingId(record.id);
 
     const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
-    const payoutRows = buildPayoutRows(record, project);
+    const payoutRows = buildPayoutRows(record, project, "direct");
+    const holdingPayoutRows = buildPayoutRows(record, project, "holding");
 
     if (payoutRows.length === 0) {
       setError("Unable to build payout rows for this case.");
@@ -198,6 +228,20 @@ export function CommReviewPage({ userId }: { userId: string }) {
 
     if (deleteError) {
       setError(deleteError.message);
+      setIsApprovingId(null);
+      return;
+    }
+
+    const { error: deleteHoldingError } = await supabase
+      .from("sales_case_payouts")
+      .delete()
+      .eq("sales_case_id", record.id)
+      .eq("payout_type", "tier_upgrade_top_up")
+      .eq("source_commission_structure_id", "holding_commission")
+      .eq("target_commission_structure_id", "released");
+
+    if (deleteHoldingError) {
+      setError(deleteHoldingError.message);
       setIsApprovingId(null);
       return;
     }
@@ -224,9 +268,31 @@ export function CommReviewPage({ userId }: { userId: string }) {
       paid_by: null,
     }));
 
+    const holdingPayload: Omit<SalesCasePayoutRecord, "id" | "created_at">[] = holdingPayoutRows.map((row) => ({
+      sales_case_id: record.id,
+      profile_id: row.profileId,
+      payout_type: "tier_upgrade_top_up",
+      source_commission_structure_id: "holding_commission",
+      source_commission_structure_label: "Holding Commission",
+      target_commission_structure_id: "released",
+      target_commission_structure_label: "Released",
+      agent_commission_percentage: Number(row.agentCommissionPercentage.toFixed(3)),
+      pre_leader_override_percentage: Number(row.preLeaderOverridePercentage.toFixed(3)),
+      leader_override_percentage: Number(row.leaderOverridePercentage.toFixed(3)),
+      total_amount: Number(row.totalAmount.toFixed(2)),
+      payout_status: "Pending",
+      payment_receipt_url: null,
+      approved_at: null,
+      approved_by: null,
+      rejected_at: null,
+      rejected_by: null,
+      paid_at: null,
+      paid_by: null,
+    }));
+
     const { error: insertError } = await supabase
       .from("sales_case_payouts")
-      .insert(payoutPayload);
+      .insert([...payoutPayload, ...holdingPayload]);
 
     if (insertError) {
       setError(insertError.message);
@@ -326,6 +392,7 @@ export function CommReviewPage({ userId }: { userId: string }) {
                 const bookingDate = record.booking_date ? new Date(record.booking_date) : null;
                 const companyCommission = getCompanyCommission(record, project);
                 const totalPayout = getTotalPayout(record, project);
+                const status = normalizeCaseStatus(record.status);
 
                 return (
                   <tr key={record.id} className="border-b border-gray-50">
@@ -390,7 +457,7 @@ export function CommReviewPage({ userId }: { userId: string }) {
                         <button
                           type="button"
                           onClick={() => handleRevert(record)}
-                          disabled={isRevertingId === record.id}
+                          disabled={isRevertingId === record.id || status !== "Claimable"}
                           className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-red-200 text-red-600 hover:text-red-700 disabled:opacity-60"
                         >
                           {isRevertingId === record.id ? "Reverting..." : "Revert"}
@@ -398,7 +465,7 @@ export function CommReviewPage({ userId }: { userId: string }) {
                         <button
                           type="button"
                           onClick={() => handleApproved(record)}
-                          disabled={isApprovingId === record.id}
+                          disabled={isApprovingId === record.id || status !== "Claimable"}
                           className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-green-200 text-green-700 hover:text-green-800 disabled:opacity-60"
                         >
                           {isApprovingId === record.id ? "Approving..." : "Approved"}

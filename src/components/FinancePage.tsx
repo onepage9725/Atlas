@@ -99,6 +99,16 @@ type ReferenceTooltipState = {
   left: number;
 };
 
+type VoucherHistoryMeta = {
+  memberLabels?: string[];
+  payoutIds?: string[];
+  componentKeys?: string[];
+  grossAmount?: number;
+  salesCaseIds?: string[];
+};
+
+const HISTORY_META_SEPARATOR = "|||META|||";
+
 const formatAmount = (value: number | null) => {
   if (value === null || Number.isNaN(value)) return "-";
   const roundedValue = Number(value.toFixed(2));
@@ -160,6 +170,33 @@ const getAttachmentLabelFromPublicUrl = (publicUrl: string | null) => {
   return pathParts[pathParts.length - 1] || storagePath;
 };
 
+const parseVoucherHistoryMeta = (referenceDetail: string | null | undefined) => {
+  const rawDetail = (referenceDetail ?? "").trim();
+  const [, metaPayload] = rawDetail.split(HISTORY_META_SEPARATOR);
+
+  if (!metaPayload) {
+    return null;
+  }
+
+  try {
+    const [metaJson] = metaPayload.split(" | ");
+    return JSON.parse(metaJson) as VoucherHistoryMeta;
+  } catch {
+    return null;
+  }
+};
+
+const getVoucherProjectUnitsLabel = (referenceDetail: string | null | undefined) => {
+  const rawDetail = (referenceDetail ?? "").trim();
+
+  if (!rawDetail) {
+    return "-";
+  }
+
+  const [baseDetail] = rawDetail.split(HISTORY_META_SEPARATOR);
+  return baseDetail?.trim() || "-";
+};
+
 const getLocalDateInputValue = (date: Date) => {
   const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return offsetDate.toISOString().slice(0, 10);
@@ -189,7 +226,7 @@ const formatLocalDate = (value: string | null) => {
     return value;
   }
 
-  return parsedDate.toLocaleDateString();
+  return parsedDate.toLocaleDateString("en-GB");
 };
 
 const sanitizeFileName = (fileName: string) => {
@@ -454,8 +491,33 @@ export function FinancePage({ userId, role }: FinancePageProps) {
   };
 
   const financeRows = useMemo<FinanceTableRow[]>(() => {
+    const voucherPayoutIds = new Set<string>();
+    const voucherAttachmentUrls = new Set<string>();
+
+    entries.forEach((entry) => {
+      if (entry.description !== "Payment voucher generated") {
+        return;
+      }
+
+      if (entry.attachment_url) {
+        voucherAttachmentUrls.add(entry.attachment_url);
+      }
+
+      const meta = parseVoucherHistoryMeta(entry.reference_detail);
+      (meta?.payoutIds ?? []).forEach((payoutId) => {
+        if (payoutId) {
+          voucherPayoutIds.add(payoutId);
+        }
+      });
+    });
+
     const payoutRows: FinanceTableRow[] = payouts
-      .filter((payout) => payout.payout_status === "Paid")
+      .filter(
+        (payout) =>
+          payout.payout_status === "Paid" &&
+          !voucherPayoutIds.has(payout.id) &&
+          !(payout.payment_receipt_url && voucherAttachmentUrls.has(payout.payment_receipt_url))
+      )
       .map((payout) => {
       const record = caseMap.get(payout.sales_case_id) ?? null;
       const project = record?.project_id ? projectMap.get(record.project_id) ?? null : null;
@@ -500,27 +562,41 @@ export function FinancePage({ userId, role }: FinancePageProps) {
       const project = linkedCase?.project_id ? projectMap.get(linkedCase.project_id) ?? null : null;
       const detailsPrimary = entry.description || "Manual finance entry";
       const detailsSecondary = project?.project_name || "";
-      const referenceLabel = entry.reference_label || "Manual entry";
-      const agentLabel = "-";
+      const historyMeta = parseVoucherHistoryMeta(entry.reference_detail);
+      const voucherMemberLabel = Array.from(new Set((historyMeta?.memberLabels ?? []).filter(Boolean))).join(", ");
+      const agentLabel = entry.description === "Payment voucher generated"
+        ? voucherMemberLabel || "-"
+        : "-";
+      const voucherProjectUnitsLabel = getVoucherProjectUnitsLabel(entry.reference_detail);
+      const displayAmount =
+        entry.description === "Payment voucher generated"
+          ? Number((historyMeta?.grossAmount ?? entry.amount).toFixed(2))
+          : entry.amount;
+      const referenceLabel = entry.description === "Payment voucher generated"
+        ? "Project & Units"
+        : entry.reference_label || "Manual entry";
+      const referenceDetail = entry.description === "Payment voucher generated"
+        ? voucherProjectUnitsLabel
+        : entry.reference_detail || null;
 
       return {
         id: entry.id,
         rowType: "entry",
         rowCategory: "other",
         date: entry.transacted_at,
-        amount: entry.amount,
+        amount: displayAmount,
         directionLabel: entry.entry_type === "cash_in" ? "Cash In" : "Cash Out",
         agentLabel,
         detailsPrimary,
         detailsSecondary,
         referenceLabel,
         referenceSubLabel: null,
-        referenceDetail: entry.reference_detail || null,
+        referenceDetail,
         attachmentUrl: entry.attachment_url,
         createdByLabel: createdBy?.name || createdBy?.email || "-",
         projectId: linkedCase?.project_id ?? null,
         statusLabel: linkedCase ? normalizeCaseStatus(linkedCase.status) : entry.entry_type === "cash_in" ? "Cash In" : "Cash Out",
-        searchText: [agentLabel, detailsPrimary, detailsSecondary, linkedCase?.customer_name || "", referenceLabel]
+        searchText: [agentLabel, detailsPrimary, detailsSecondary, linkedCase?.customer_name || "", referenceLabel, voucherProjectUnitsLabel]
           .join(" ")
           .toLowerCase(),
         canManage: true,
@@ -611,22 +687,51 @@ export function FinancePage({ userId, role }: FinancePageProps) {
   );
 
   const totalMonthlySalesCommission = useMemo(
-    () =>
-      filteredCaseRows.reduce((sum, record) => {
+    () => {
+      const filteredCaseIds = new Set(filteredCaseRows.map((record) => record.id));
+
+      const salesDirect = filteredCaseRows.reduce((sum, record) => {
         const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
 
         return sum + getCaseCommissionAmountForProfiles(record, project, profiles, memberProfileIds);
-      }, 0),
-    [filteredCaseRows, memberProfileIds, profiles, projectMap]
+      }, 0);
+
+      const salesTopUp = payouts
+        .filter(
+          (payout) =>
+            payout.payout_type === "tier_upgrade_top_up" &&
+            filteredCaseIds.has(payout.sales_case_id) &&
+            memberProfileIds.has(payout.profile_id)
+        )
+        .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
+
+      return salesDirect + salesTopUp;
+    },
+    [filteredCaseRows, memberProfileIds, payouts, profiles, projectMap]
   );
 
   const totalMonthlyConvertedCommission = useMemo(
-    () =>
-      filteredCaseRows.reduce(
+    () => {
+      const filteredCaseIds = new Set(filteredCaseRows.map((record) => record.id));
+
+      const convertedDirect = filteredCaseRows.reduce(
         (sum, record) => sum + getCompletedCommissionAmountForProfiles(payoutMap.get(record.id) ?? [], memberProfileIds),
         0
-      ),
-    [filteredCaseRows, memberProfileIds, payoutMap]
+      );
+
+      const convertedTopUp = payouts
+        .filter(
+          (payout) =>
+            payout.payout_type === "tier_upgrade_top_up" &&
+            payout.payout_status === "Paid" &&
+            filteredCaseIds.has(payout.sales_case_id) &&
+            memberProfileIds.has(payout.profile_id)
+        )
+        .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
+
+      return convertedDirect + convertedTopUp;
+    },
+    [filteredCaseRows, memberProfileIds, payoutMap, payouts]
   );
 
   const totalMonthlyCaseCount = useMemo(() => filteredCaseRows.length, [filteredCaseRows]);
@@ -634,7 +739,12 @@ export function FinancePage({ userId, role }: FinancePageProps) {
   const totalPaidOutToAgent = useMemo(
     () =>
       filteredFinanceRows.reduce(
-        (sum, row) => sum + (row.rowType === "payout" ? row.amount ?? 0 : 0),
+        (sum, row) =>
+          sum +
+          ((row.rowType === "payout" ||
+            (row.rowType === "entry" && row.directionLabel === "Cash Out" && row.detailsPrimary === "Payment voucher generated"))
+            ? row.amount ?? 0
+            : 0),
         0
       ),
     [filteredFinanceRows]
@@ -644,7 +754,12 @@ export function FinancePage({ userId, role }: FinancePageProps) {
     () =>
       filteredFinanceRows.reduce(
         (sum, row) =>
-          sum + (row.rowType === "entry" && row.directionLabel === "Cash Out" ? row.amount ?? 0 : 0),
+          sum +
+          (row.rowType === "entry" &&
+          row.directionLabel === "Cash Out" &&
+          row.detailsPrimary !== "Payment voucher generated"
+            ? row.amount ?? 0
+            : 0),
         0
       ),
     [filteredFinanceRows]

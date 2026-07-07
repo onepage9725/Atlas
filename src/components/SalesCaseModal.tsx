@@ -10,8 +10,10 @@ import {
   getDefaultProjectCommissionStructure,
   getCaseCommissionStructure,
   getCommissionStructureLabel,
+  getDirectCommissionPercentage,
   type CommissionStructure,
 } from "../lib/commissionStructures";
+import { buildCommissionStructureByTotalPercentage } from "../lib/salesCasePayouts";
 
 export type ProjectOption = {
   id: string;
@@ -20,6 +22,8 @@ export type ProjectOption = {
   agent_commission: number | null;
   pre_leader_override: number | null;
   leader_override: number | null;
+  direct_commission: number | null;
+  holding_commission: number | null;
   commission_structures: CommissionStructure[] | null;
   default_commission_structure_id: string | null;
 };
@@ -77,7 +81,7 @@ export const getCaseStatusClasses = (status: string | null | undefined) => {
 
 export const hasCaseWorkflowColumns = (
   record: Partial<SalesCaseRecord> | null | undefined
-) => Boolean(record && ("status" in record || "lo_draft_url" in record));
+) => Boolean(record && ("status" in record || "lo_draft_url" in record || "signed_lo_date" in record));
 
 export const isCaseLockedForEditing = (status: string | null | undefined) => {
   const normalizedStatus = normalizeCaseStatus(status);
@@ -230,10 +234,17 @@ export type SalesCaseRecord = {
   customer_id: string | null;
   customer_contact_number: string | null;
   customer_email: string | null;
+  customer_address: string | null;
+  emergency_contact_name: string | null;
+  emergency_contact_relationship: string | null;
+  emergency_contact_ic_passport: string | null;
+  emergency_contact_number: string | null;
+  emergency_contact_email: string | null;
   race: string | null;
   buyer_type: string | null;
   booking_form_url: string | null;
   lo_draft_url: string | null;
+  signed_lo_date: string | null;
   commission_structure: CommissionStructure | null;
   status: SalesCaseStatus | null;
   created_by: string | null;
@@ -266,6 +277,7 @@ type SalesCaseModalProps = {
     memberLabel: string;
     receiptUrl: string;
     paidAt: string | null;
+    grossAmount: number;
   }>;
   onDelete?: () => void;
   onClose: () => void;
@@ -303,12 +315,19 @@ const createEmptyForm = () => ({
   customerId: "",
   customerContactNumber: "",
   customerEmail: "",
+  customerAddress: "",
+  emergencyContactName: "",
+  emergencyContactRelationship: "",
+  emergencyContactIcPassport: "",
+  emergencyContactNumber: "",
+  emergencyContactEmail: "",
   race: "Malay",
   raceOther: "",
   buyerType: "Loan",
   bookingFormName: "",
   status: "Pending" as SalesCaseStatus,
   loDraftName: "",
+  signedLoDate: "",
 });
 
 const formatNumberInput = (value: number | null) => (value === null ? "" : value.toString());
@@ -318,6 +337,35 @@ function toNumberOrNull(value: string) {
   const parsed = Number(value);
   return Number.isNaN(parsed) ? null : parsed;
 }
+
+const shouldRetryWithoutExtendedContactColumns = (message: string) =>
+  /Could not find the 'customer_address' column|Could not find the 'emergency_contact_|Could not find the 'signed_lo_date' column/i.test(message);
+
+const isRowLevelSecurityError = (message: string) =>
+  /row-level security policy|violates row-level security|new row violates row-level security/i.test(message);
+
+const stripExtendedContactColumns = <T extends Record<string, unknown>>(payload: T) => {
+  const {
+    customer_address,
+    emergency_contact_name,
+    emergency_contact_relationship,
+    emergency_contact_ic_passport,
+    emergency_contact_number,
+    emergency_contact_email,
+    signed_lo_date,
+    ...legacyPayload
+  } = payload;
+
+  void customer_address;
+  void emergency_contact_name;
+  void emergency_contact_relationship;
+  void emergency_contact_ic_passport;
+  void emergency_contact_number;
+  void emergency_contact_email;
+  void signed_lo_date;
+
+  return legacyPayload;
+};
 
 export function SalesCaseModal({
   userId,
@@ -396,6 +444,12 @@ export function SalesCaseModal({
       customerId: initialCase.customer_id ?? "",
       customerContactNumber: initialCase.customer_contact_number ?? "",
       customerEmail: initialCase.customer_email ?? "",
+      customerAddress: initialCase.customer_address ?? "",
+      emergencyContactName: initialCase.emergency_contact_name ?? "",
+      emergencyContactRelationship: initialCase.emergency_contact_relationship ?? "",
+      emergencyContactIcPassport: initialCase.emergency_contact_ic_passport ?? "",
+      emergencyContactNumber: initialCase.emergency_contact_number ?? "",
+      emergencyContactEmail: initialCase.emergency_contact_email ?? "",
       race: isOtherRace ? "Other" : raceValue,
       raceOther: isOtherRace ? raceValue : "",
       buyerType: initialCase.buyer_type ?? "Loan",
@@ -406,6 +460,7 @@ export function SalesCaseModal({
       loDraftName: initialCase.lo_draft_url
         ? initialCase.lo_draft_url.split("/").pop() ?? ""
         : "",
+      signedLoDate: initialCase.signed_lo_date ?? "",
     });
     setBookingFormFile(null);
     setLoDraftFile(null);
@@ -493,6 +548,18 @@ export function SalesCaseModal({
       return [] as CommissionRow[];
     }
 
+    const directPercentage = getDirectCommissionPercentage(selectedCommissionStructure);
+    const directCommissionStructure = buildCommissionStructureByTotalPercentage(
+      selectedCommissionStructure,
+      directPercentage,
+      `${selectedCommissionStructure.id}-direct`,
+      selectedCommissionStructure.label,
+    );
+
+    if (!directCommissionStructure) {
+      return [] as CommissionRow[];
+    }
+
     const nettPrice = toNumberOrNull(formData.nettPrice) ?? 0;
     const participants = [creatorProfile, selectedInvolvedProfile].filter(
       (profile, index, array): profile is ProfileOption =>
@@ -503,10 +570,10 @@ export function SalesCaseModal({
       return [] as CommissionRow[];
     }
 
-    const splitAgentPercentage = (selectedCommissionStructure.agent_commission ?? 0) / participants.length;
+    const splitAgentPercentage = (directCommissionStructure.agent_commission ?? 0) / participants.length;
     const splitPreLeaderPercentage =
-      (selectedCommissionStructure.pre_leader_override ?? 0) / participants.length;
-    const splitLeaderPercentage = (selectedCommissionStructure.leader_override ?? 0) / participants.length;
+      (directCommissionStructure.pre_leader_override ?? 0) / participants.length;
+    const splitLeaderPercentage = (directCommissionStructure.leader_override ?? 0) / participants.length;
 
     const rowsByKey = new Map<string, CommissionRow>();
 
@@ -703,8 +770,36 @@ export function SalesCaseModal({
     setIsSubmitting(true);
 
     try {
-      const bookingFormUrl = await uploadBookingForm();
-      const loDraftUrl = await uploadLoDraft();
+      let bookingFormUrl: string | null = initialCase?.booking_form_url ?? null;
+      let loDraftUrl: string | null = initialCase?.lo_draft_url ?? null;
+
+      try {
+        bookingFormUrl = await uploadBookingForm();
+      } catch (uploadError) {
+        const uploadMessage = uploadError instanceof Error ? uploadError.message : String(uploadError ?? "");
+
+        if (isRowLevelSecurityError(uploadMessage)) {
+          setError("Booking form upload is blocked by Supabase storage policy. Please update storage.objects policy for bucket 'cases'.");
+          setIsSubmitting(false);
+          return;
+        }
+
+        throw uploadError;
+      }
+
+      try {
+        loDraftUrl = await uploadLoDraft();
+      } catch (uploadError) {
+        const uploadMessage = uploadError instanceof Error ? uploadError.message : String(uploadError ?? "");
+
+        if (isRowLevelSecurityError(uploadMessage)) {
+          setError("LO Draft upload is blocked by Supabase storage policy. Please update storage.objects policy for bucket 'cases'.");
+          setIsSubmitting(false);
+          return;
+        }
+
+        throw uploadError;
+      }
       const nextStatus = enableWorkflowFields && isEditing ? formData.status : "Pending";
       const nextCommissionStructure = selectedCommissionStructure;
 
@@ -714,17 +809,40 @@ export function SalesCaseModal({
         return;
       }
 
-      if (enableWorkflowFields && nextStatus === "Signed LO" && !loDraftUrl) {
-        setError("Please upload the LO Draft before changing the status to Signed LO.");
+      if (enableWorkflowFields && nextStatus === "Signed LO" && !Boolean(loDraftFile || loDraftUrl)) {
+        setError("Please upload the LO Draft successfully before changing the status to Signed LO.");
         setIsSubmitting(false);
         return;
       }
 
-      const involvedIds = Array.from(
+      const hasSignedLoAttachment = Boolean(loDraftFile || loDraftUrl);
+      const signedLoDate = formData.signedLoDate.trim();
+
+      if (enableWorkflowFields && hasSignedLoAttachment && !signedLoDate) {
+        setError("Please select the Signed LO date after uploading the LO Draft.");
+        setIsSubmitting(false);
+        return;
+      }
+
+      if (enableWorkflowFields && nextStatus === "Signed LO" && !signedLoDate) {
+        setError("Please select the Signed LO date before setting the case to Signed LO.");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const directInvolvedIds = Array.from(
         new Set(
           [
             caseOwnerId,
             formData.involvedUserId || null,
+          ].filter(Boolean)
+        )
+      ) as string[];
+
+      const involvedIds = Array.from(
+        new Set(
+          [
+            ...directInvolvedIds,
             ...commissionRows.map((row) => row.profileId),
           ].filter(Boolean)
         )
@@ -741,11 +859,18 @@ export function SalesCaseModal({
         customer_id: string;
         customer_contact_number: string;
         customer_email: string;
+        customer_address: string;
+        emergency_contact_name: string;
+        emergency_contact_relationship: string;
+        emergency_contact_ic_passport: string;
+        emergency_contact_number: string;
+        emergency_contact_email: string;
         race: string;
         buyer_type: string;
         booking_form_url: string | null;
         commission_structure: CommissionStructure;
         lo_draft_url?: string | null;
+        signed_lo_date?: string | null;
         status?: SalesCaseStatus;
         created_by: string;
         involved_profile_id: string | null;
@@ -765,6 +890,12 @@ export function SalesCaseModal({
         customer_id: formData.customerId,
         customer_contact_number: formData.customerContactNumber,
         customer_email: formData.customerEmail,
+        customer_address: formData.customerAddress,
+        emergency_contact_name: formData.emergencyContactName,
+        emergency_contact_relationship: formData.emergencyContactRelationship,
+        emergency_contact_ic_passport: formData.emergencyContactIcPassport,
+        emergency_contact_number: formData.emergencyContactNumber,
+        emergency_contact_email: formData.emergencyContactEmail,
         race: formData.race === "Other" ? formData.raceOther : formData.race,
         buyer_type: formData.buyerType,
         booking_form_url: bookingFormUrl,
@@ -776,6 +907,7 @@ export function SalesCaseModal({
 
       if (enableWorkflowFields) {
         payload.lo_draft_url = loDraftUrl;
+        payload.signed_lo_date = signedLoDate || null;
         payload.status = nextStatus;
       }
 
@@ -786,10 +918,18 @@ export function SalesCaseModal({
         payload.edit_reviewed_at = null;
         payload.edit_reviewed_by = null;
 
-        const { error: updateError } = await supabase
+        let { error: updateError } = await supabase
           .from("sales_cases")
           .update(payload)
           .eq("id", initialCase.id);
+
+        if (updateError && shouldRetryWithoutExtendedContactColumns(updateError.message)) {
+          const { error: retryError } = await supabase
+            .from("sales_cases")
+            .update(stripExtendedContactColumns(payload))
+            .eq("id", initialCase.id);
+          updateError = retryError;
+        }
 
         if (updateError) {
           setError(updateError.message);
@@ -835,14 +975,99 @@ export function SalesCaseModal({
           console.error("Failed to create notifications for updated sales case", notificationError);
         }
       } else {
-        const { data: insertedCase, error: submitError } = await supabase
+        let { data: insertedCase, error: submitError } = await supabase
           .from("sales_cases")
           .insert([payload])
           .select("id")
           .single();
 
+        if (submitError && shouldRetryWithoutExtendedContactColumns(submitError.message)) {
+          const retryResult = await supabase
+            .from("sales_cases")
+            .insert([stripExtendedContactColumns(payload)])
+            .select("id")
+            .single();
+          insertedCase = retryResult.data;
+          submitError = retryResult.error;
+        }
+
+        if (submitError && isRowLevelSecurityError(submitError.message)) {
+          const rlsSafePayload = {
+            ...payload,
+            involved_user_ids: directInvolvedIds,
+          };
+
+          const retryResult = await supabase
+            .from("sales_cases")
+            .insert([rlsSafePayload])
+            .select("id")
+            .single();
+
+          insertedCase = retryResult.data;
+          submitError = retryResult.error;
+
+          if (submitError && shouldRetryWithoutExtendedContactColumns(submitError.message)) {
+            const retryLegacyResult = await supabase
+              .from("sales_cases")
+              .insert([stripExtendedContactColumns(rlsSafePayload)])
+              .select("id")
+              .single();
+
+            insertedCase = retryLegacyResult.data;
+            submitError = retryLegacyResult.error;
+          }
+
+          if (submitError && isRowLevelSecurityError(submitError.message)) {
+            const creatorOwnedInvolvedIds = Array.from(
+              new Set(
+                [
+                  userId,
+                  caseOwnerId !== userId ? caseOwnerId : null,
+                  formData.involvedUserId || null,
+                ].filter(Boolean)
+              )
+            ) as string[];
+
+            const creatorOwnedPayload = {
+              ...rlsSafePayload,
+              created_by: userId,
+              involved_profile_id:
+                caseOwnerId !== userId
+                  ? caseOwnerId
+                  : formData.involvedUserId || null,
+              involved_user_ids: creatorOwnedInvolvedIds,
+            };
+
+            const retryCreatorOwnedResult = await supabase
+              .from("sales_cases")
+              .insert([creatorOwnedPayload])
+              .select("id")
+              .single();
+
+            insertedCase = retryCreatorOwnedResult.data;
+            submitError = retryCreatorOwnedResult.error;
+
+            if (submitError && shouldRetryWithoutExtendedContactColumns(submitError.message)) {
+              const retryCreatorOwnedLegacyResult = await supabase
+                .from("sales_cases")
+                .insert([stripExtendedContactColumns(creatorOwnedPayload)])
+                .select("id")
+                .single();
+
+              insertedCase = retryCreatorOwnedLegacyResult.data;
+              submitError = retryCreatorOwnedLegacyResult.error;
+            }
+          }
+        }
+
         if (submitError) {
           setError(submitError.message);
+          setIsSubmitting(false);
+          return;
+        }
+
+        if (!insertedCase) {
+          setError("Case was created but no case id was returned. Please refresh and check your latest case.");
           setIsSubmitting(false);
           return;
         }
@@ -986,6 +1211,16 @@ export function SalesCaseModal({
                         <span className="text-xs text-gray-500">
                           {loDraftFile?.name || formData.loDraftName || "No file selected"}
                         </span>
+                        {initialCase?.lo_draft_url && (
+                          <a
+                            href={initialCase.lo_draft_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-xs rounded-md border border-blue-200 px-2 py-1 text-blue-700 hover:text-blue-800"
+                          >
+                            View
+                          </a>
+                        )}
                       </div>
                     ) : (
                       <div className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-700">
@@ -999,26 +1234,41 @@ export function SalesCaseModal({
                             View LO Draft
                           </a>
                         ) : (
-                          "-"
+                          <span className="text-gray-500">No file</span>
                         )}
                       </div>
                     )}
+
+                    <div className="mt-3">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Signed LO Date</label>
+                      <input
+                        type="date"
+                        name="signedLoDate"
+                        value={formData.signedLoDate}
+                        onChange={handleChange}
+                        className="w-full rounded-lg border border-gray-200 p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none bg-white"
+                        required={Boolean((allowLoDraftUpload && loDraftFile) || formData.status === "Signed LO")}
+                      />
+                    </div>
                   </div>
                 )}
               </div>
             )}
-            <div className="md:col-span-2">
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Booking Date</label>
               <input
                 type="date"
                 name="bookingDate"
                 value={formData.bookingDate}
                 onChange={handleChange}
-                className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none bg-white"
                 required
               />
             </div>
-            <div className="md:col-span-2">
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Project</label>
               <select
                 name="projectId"
@@ -1037,15 +1287,12 @@ export function SalesCaseModal({
                 ))}
               </select>
             </div>
-            {selectedProject && selectedCommissionStructure && (
-              <div className="md:col-span-2 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3 text-sm text-gray-600">
-                <span className="font-medium text-gray-800">Commission Structure:</span>{" "}
-                {getCommissionStructureLabel(selectedCommissionStructure)}
-              </div>
-            )}
-            <div className="md:col-span-2">
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Sales Person Involve
+                Involved Salesperson
               </label>
               <select
                 name="involvedUserId"
@@ -1060,7 +1307,13 @@ export function SalesCaseModal({
                   </option>
                 ))}
               </select>
+              <p className="mt-2 text-xs text-gray-500">
+                If another salesperson is involved, select them here.
+              </p>
             </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">SPA Price (RM)</label>
               <input
@@ -1068,9 +1321,7 @@ export function SalesCaseModal({
                 name="spaPrice"
                 value={formData.spaPrice}
                 onChange={handleChange}
-                inputMode="decimal"
-                min="0"
-                step="0.01"
+                placeholder="e.g. 500000"
                 className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
                 required
               />
@@ -1082,13 +1333,14 @@ export function SalesCaseModal({
                 name="nettPrice"
                 value={formData.nettPrice}
                 onChange={handleChange}
-                inputMode="decimal"
-                min="0"
-                step="0.01"
+                placeholder="e.g. 450000"
                 className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
                 required
               />
             </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Booking Fee (RM)</label>
               <input
@@ -1096,11 +1348,8 @@ export function SalesCaseModal({
                 name="bookingFee"
                 value={formData.bookingFee}
                 onChange={handleChange}
-                inputMode="decimal"
-                min="0"
-                step="0.01"
+                placeholder="e.g. 1000"
                 className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
-                required
               />
             </div>
             <div>
@@ -1110,56 +1359,146 @@ export function SalesCaseModal({
                 name="unitNumber"
                 value={formData.unitNumber}
                 onChange={handleChange}
+                placeholder="e.g. A-12-01"
                 className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
                 required
               />
             </div>
+          </div>
+
+          <div className="space-y-4 rounded-lg border border-gray-100 bg-gray-50/60 p-4">
+            <h4 className="text-base font-semibold text-gray-800">Customer Details</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name</label>
+                <input
+                  type="text"
+                  name="customerName"
+                  value={formData.customerName}
+                  onChange={handleChange}
+                  placeholder="e.g. John Doe"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Customer IC / Passport
+                </label>
+                <input
+                  type="text"
+                  name="customerId"
+                  value={formData.customerId}
+                  onChange={handleChange}
+                  placeholder="e.g. 900101-01-1234"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                  required
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Customer Contact Number
+                </label>
+                <input
+                  type="text"
+                  name="customerContactNumber"
+                  value={formData.customerContactNumber}
+                  onChange={handleChange}
+                  placeholder="e.g. 012-3456789"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Customer Email</label>
+                <input
+                  type="email"
+                  name="customerEmail"
+                  value={formData.customerEmail}
+                  onChange={handleChange}
+                  placeholder="e.g. john.doe@example.com"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                />
+              </div>
+            </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Customer Address</label>
               <input
                 type="text"
-                name="customerName"
-                value={formData.customerName}
+                name="customerAddress"
+                value={formData.customerAddress}
                 onChange={handleChange}
+                placeholder="e.g. 123, Jalan Ampang, 50450 Kuala Lumpur"
                 className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
-                required
               />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Customer IC / Passport</label>
-              <input
-                type="text"
-                name="customerId"
-                value={formData.customerId}
-                onChange={handleChange}
-                className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
-                required
-              />
+          </div>
+
+          <div className="space-y-4 rounded-lg border border-gray-100 bg-gray-50/60 p-4">
+            <h4 className="text-base font-semibold text-gray-800">Emergency Contact</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input
+                  type="text"
+                  name="emergencyContactName"
+                  value={formData.emergencyContactName}
+                  onChange={handleChange}
+                  placeholder="e.g. Jane Doe"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Relationship</label>
+                <input
+                  type="text"
+                  name="emergencyContactRelationship"
+                  value={formData.emergencyContactRelationship}
+                  onChange={handleChange}
+                  placeholder="e.g. Spouse"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">IC / Passport</label>
+                <input
+                  type="text"
+                  name="emergencyContactIcPassport"
+                  value={formData.emergencyContactIcPassport}
+                  onChange={handleChange}
+                  placeholder="e.g. 900101-01-1234"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Contact Number</label>
+                <input
+                  type="text"
+                  name="emergencyContactNumber"
+                  value={formData.emergencyContactNumber}
+                  onChange={handleChange}
+                  placeholder="e.g. 012-3456789"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                />
+              </div>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Customer Contact Number
-              </label>
-              <input
-                type="tel"
-                name="customerContactNumber"
-                value={formData.customerContactNumber}
-                onChange={handleChange}
-                className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Customer Email</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
               <input
                 type="email"
-                name="customerEmail"
-                value={formData.customerEmail}
+                name="emergencyContactEmail"
+                value={formData.emergencyContactEmail}
                 onChange={handleChange}
+                placeholder="e.g. jane.doe@example.com"
                 className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
-                required
               />
             </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Race</label>
               <select
@@ -1203,10 +1542,8 @@ export function SalesCaseModal({
                 ))}
               </select>
             </div>
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Attach Booking Form (PDF)
-              </label>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Attach Booking Form (PDF)</label>
               <div className="flex flex-wrap items-center gap-3">
                 <label className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded-lg text-sm cursor-pointer hover:bg-gray-50">
                   <Upload className="w-4 h-4 text-gray-500" />
@@ -1221,6 +1558,16 @@ export function SalesCaseModal({
                 <span className="text-xs text-gray-500">
                   {formData.bookingFormName || "No file selected"}
                 </span>
+                {initialCase?.booking_form_url && (
+                  <a
+                    href={initialCase.booking_form_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs rounded-md border border-blue-200 px-2 py-1 text-blue-700 hover:text-blue-800"
+                  >
+                    View
+                  </a>
+                )}
               </div>
               <p className="text-xs text-gray-400 mt-2">
                 Combine booking form, IC/passport, and booking receipt in one PDF.
@@ -1289,6 +1636,9 @@ export function SalesCaseModal({
                           <div className="font-medium text-gray-800">{receiptRow.memberLabel}</div>
                           <div className="text-xs text-gray-500">
                             {receiptRow.paidAt ? new Date(receiptRow.paidAt).toLocaleDateString() : "Paid receipt"}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            Gross Amount: {formatCommissionAmount(receiptRow.grossAmount)}
                           </div>
                         </div>
                         <a

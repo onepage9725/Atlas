@@ -1,4 +1,4 @@
-import type { CommissionStructure } from "./commissionStructures";
+import { getCommissionStructureTotal, type CommissionStructure } from "./commissionStructures";
 
 type SalesCasePayoutSource = {
   created_by: string | null;
@@ -182,5 +182,34 @@ export const buildTierUpgradeTopUpStructure = (
     agent_commission: agentCommission,
     pre_leader_override: preLeaderOverride,
     leader_override: leaderOverride,
+    direct_commission: null,
+    holding_commission: null,
+  } satisfies CommissionStructure;
+};
+
+export const buildCommissionStructureByTotalPercentage = (
+  sourceStructure: CommissionStructure,
+  totalPercentage: number,
+  structureId = `${sourceStructure.id}-scaled`,
+  structureLabel = sourceStructure.label,
+) => {
+  const sourceTotal = getCommissionStructureTotal(sourceStructure);
+
+  if (sourceTotal <= 0 || totalPercentage <= 0) {
+    return null;
+  }
+
+  const scale = totalPercentage / sourceTotal;
+
+  return {
+    ...sourceStructure,
+    id: structureId,
+    label: structureLabel,
+    company_commission: (sourceStructure.company_commission ?? 0) * scale,
+    agent_commission: (sourceStructure.agent_commission ?? 0) * scale,
+    pre_leader_override: (sourceStructure.pre_leader_override ?? 0) * scale,
+    leader_override: (sourceStructure.leader_override ?? 0) * scale,
+    direct_commission: null,
+    holding_commission: null,
   } satisfies CommissionStructure;
 };

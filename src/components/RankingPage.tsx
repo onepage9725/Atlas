@@ -7,7 +7,7 @@ import {
   getCasePersonalAmountForProfile,
   getCasePersonalAmountForProfiles,
 } from "../lib/salesCaseMetrics";
-import type { ProjectOption, SalesCaseRecord } from "./SalesCaseModal";
+import type { ProjectOption, SalesCasePayoutRecord, SalesCaseRecord } from "./SalesCaseModal";
 
 type RankingProfile = {
   id: string;
@@ -159,6 +159,7 @@ export function RankingPage({ userId }: RankingPageProps) {
   const today = new Date();
   const [profiles, setProfiles] = useState<RankingProfile[]>([]);
   const [cases, setCases] = useState<SalesCaseRecord[]>([]);
+  const [payouts, setPayouts] = useState<SalesCasePayoutRecord[]>([]);
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedMonthValue, setSelectedMonthValue] = useState(() => `${today.getMonth() + 1}`.padStart(2, "0"));
@@ -170,7 +171,7 @@ export function RankingPage({ userId }: RankingPageProps) {
     const loadData = async () => {
       setError(null);
 
-      const [profileRpcResult, caseRpcResult, projectResult] = await Promise.all([
+      const [profileRpcResult, caseRpcResult, projectResult, payoutResult] = await Promise.all([
         supabase.rpc("get_ranking_profiles"),
         supabase.rpc("get_ranking_sales_cases"),
         supabase
@@ -179,6 +180,11 @@ export function RankingPage({ userId }: RankingPageProps) {
             "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, commission_structures, default_commission_structure_id"
           )
           .eq("is_hidden", false),
+        supabase
+          .from("sales_case_payouts")
+          .select("*")
+          .in("payout_status", ["Pending", "Approve", "Paid"])
+          .order("created_at", { ascending: false }),
       ]);
 
       const shouldFallbackToDirectQueries =
@@ -209,8 +215,14 @@ export function RankingPage({ userId }: RankingPageProps) {
         return;
       }
 
+      if (payoutResult.error) {
+        setError(payoutResult.error.message);
+        return;
+      }
+
       setProfiles((profileResult.data as RankingProfile[]) ?? []);
       setCases((caseResult.data as SalesCaseRecord[]) ?? []);
+      setPayouts((payoutResult.data as SalesCasePayoutRecord[]) ?? []);
       setProjects((projectResult.data as ProjectOption[]) ?? []);
     };
 
@@ -262,6 +274,22 @@ export function RankingPage({ userId }: RankingPageProps) {
 
   const selectedMonth = selectedMonthValue === "all" ? null : `${selectedYearValue}-${selectedMonthValue}`;
 
+  const isReleasedHoldingPayout = (payout: SalesCasePayoutRecord) => {
+    if (payout.payout_type !== "tier_upgrade_top_up") {
+      return false;
+    }
+
+    const source = (payout.source_commission_structure_id ?? "").toLowerCase();
+    const target = (payout.target_commission_structure_id ?? "").toLowerCase();
+    const sourceLabel = (payout.source_commission_structure_label ?? "").toLowerCase();
+    const targetLabel = (payout.target_commission_structure_label ?? "").toLowerCase();
+
+    const sourceMatches = source === "holding_commission" || sourceLabel === "holding commission";
+    const targetMatches = target === "released" || targetLabel === "released";
+
+    return sourceMatches && targetMatches;
+  };
+
   const monthlyCases = useMemo(
     () =>
       cases.filter((record) => {
@@ -274,6 +302,35 @@ export function RankingPage({ userId }: RankingPageProps) {
       }),
     [cases, selectedMonth]
   );
+
+  const monthlyTopUpPayouts = useMemo(
+    () =>
+      payouts.filter((payout) => {
+        if (payout.payout_type !== "tier_upgrade_top_up") {
+          return false;
+        }
+
+        if (!selectedMonth) {
+          return true;
+        }
+
+        const createdAt = payout.created_at ? new Date(payout.created_at) : null;
+        return getDateMonthValue(createdAt) === selectedMonth;
+      }),
+    [payouts, selectedMonth]
+  );
+
+  const payoutsByCaseId = useMemo(() => {
+    const map = new Map<string, SalesCasePayoutRecord[]>();
+
+    payouts.forEach((payout) => {
+      const rows = map.get(payout.sales_case_id) ?? [];
+      rows.push(payout);
+      map.set(payout.sales_case_id, rows);
+    });
+
+    return map;
+  }, [payouts]);
 
   const descendantIdsByProfile = useMemo(() => {
     const byRecruiter = new Map<string, RankingProfile[]>();
@@ -325,10 +382,14 @@ export function RankingPage({ userId }: RankingPageProps) {
         (sum, record) => sum + getCasePersonalAmountForProfile(record, record.spa_price, profile.id),
         0
       );
-      const personalSales = monthlyCases.reduce((sum, record) => {
+      const personalDirectSales = monthlyCases.reduce((sum, record) => {
         const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
         return sum + getCaseCommissionAmountForProfile(record, project, memberProfiles, profile.id);
       }, 0);
+      const personalTopUpSales = monthlyTopUpPayouts
+        .filter((payout) => payout.profile_id === profile.id)
+        .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
+      const personalSales = personalDirectSales + personalTopUpSales;
       const teamIds = new Set([profile.id, ...(descendantIdsByProfile.get(profile.id) ?? [])]);
       const teamGdv =
         rankCategory === "agent"
@@ -341,8 +402,19 @@ export function RankingPage({ userId }: RankingPageProps) {
         rankCategory === "agent"
           ? personalSales
           : monthlyCases.reduce((sum, record) => {
+              const relatedIds = [record.created_by, ...(record.involved_user_ids ?? [])].filter(Boolean) as string[];
+
+              if (!relatedIds.some((profileId) => teamIds.has(profileId))) {
+                return sum;
+              }
+
               const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
-              return sum + getCaseCommissionAmountForProfiles(record, project, memberProfiles, teamIds);
+              const directSales = getCaseCommissionAmountForProfiles(record, project, memberProfiles, teamIds);
+              const releasedHoldingSales = (payoutsByCaseId.get(record.id) ?? [])
+                .filter((payout) => isReleasedHoldingPayout(payout) && teamIds.has(payout.profile_id))
+                .reduce((holdingSum, payout) => holdingSum + Number(payout.total_amount ?? 0), 0);
+
+              return sum + directSales + releasedHoldingSales;
             }, 0);
 
       return {
@@ -354,7 +426,7 @@ export function RankingPage({ userId }: RankingPageProps) {
         teamSales,
       };
     });
-  }, [descendantIdsByProfile, memberProfiles, monthlyCases, projectMap]);
+  }, [descendantIdsByProfile, memberProfiles, monthlyCases, monthlyTopUpPayouts, payoutsByCaseId, projectMap]);
 
   const sortedRankingRows = useMemo(() => {
     return rankingRows

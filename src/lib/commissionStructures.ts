@@ -7,6 +7,8 @@ export type CommissionStructure = {
   agent_commission: number | null;
   pre_leader_override: number | null;
   leader_override: number | null;
+  direct_commission: number | null;
+  holding_commission: number | null;
 };
 
 type ProjectCommissionSource = {
@@ -14,6 +16,8 @@ type ProjectCommissionSource = {
   agent_commission?: unknown;
   pre_leader_override?: unknown;
   leader_override?: unknown;
+  direct_commission?: unknown;
+  holding_commission?: unknown;
   commission_structures?: unknown;
   default_commission_structure_id?: unknown;
 };
@@ -59,11 +63,13 @@ const normalizeCommissionStructure = (
     agent_commission: toNullableNumber(record.agent_commission),
     pre_leader_override: toNullableNumber(record.pre_leader_override),
     leader_override: toNullableNumber(record.leader_override),
+    direct_commission: toNullableNumber(record.direct_commission),
+    holding_commission: toNullableNumber(record.holding_commission),
   };
 };
 
 export const buildDefaultCommissionStructure = (
-  source: Pick<ProjectCommissionSource, "company_commission" | "agent_commission" | "pre_leader_override" | "leader_override">,
+  source: Pick<ProjectCommissionSource, "company_commission" | "agent_commission" | "pre_leader_override" | "leader_override" | "direct_commission" | "holding_commission">,
 ): CommissionStructure => ({
   id: "default-tier",
   label: "Default Tier",
@@ -73,6 +79,8 @@ export const buildDefaultCommissionStructure = (
   agent_commission: toNullableNumber(source.agent_commission),
   pre_leader_override: toNullableNumber(source.pre_leader_override),
   leader_override: toNullableNumber(source.leader_override),
+  direct_commission: toNullableNumber(source.direct_commission),
+  holding_commission: toNullableNumber(source.holding_commission),
 });
 
 export const getProjectCommissionStructures = (
@@ -149,4 +157,35 @@ export const getShortCommissionStructureLabel = (label: string | null | undefine
   }
 
   return label.replace(/\s*\([^)]*\)\s*$/, "").trim() || label;
+};
+
+export const getCommissionStructureTotal = (structure: CommissionStructure | null | undefined) => {
+  if (!structure) {
+    return 0;
+  }
+
+  return (
+    (structure.company_commission ?? 0) +
+    (structure.agent_commission ?? 0) +
+    (structure.pre_leader_override ?? 0) +
+    (structure.leader_override ?? 0)
+  );
+};
+
+export const getDirectCommissionPercentage = (structure: CommissionStructure | null | undefined) => {
+  if (!structure) {
+    return 0;
+  }
+
+  const totalCommission = getCommissionStructureTotal(structure);
+  const directCommission = structure.direct_commission;
+  return directCommission === null || directCommission === undefined ? totalCommission : directCommission;
+};
+
+export const getHoldingCommissionPercentage = (structure: CommissionStructure | null | undefined) => {
+  if (!structure) {
+    return 0;
+  }
+
+  return structure.holding_commission ?? 0;
 };

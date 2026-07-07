@@ -3,9 +3,16 @@ import { KPICard } from "./KPICard";
 import { PaymentBehaviorChart } from "./PaymentBehaviorChart";
 import { supabase } from "../lib/supabaseClient";
 import {
+  getCaseCommissionStructure,
+  getDirectCommissionPercentage,
+  getHoldingCommissionPercentage,
+} from "../lib/commissionStructures";
+import { buildCommissionStructureByTotalPercentage } from "../lib/salesCasePayouts";
+import {
   getCaseCommissionAmountForProfiles,
   getCasePersonalAmountForProfiles,
   getCompletedCommissionAmountForProfiles,
+  getStoredInvolvedProfileId,
 } from "../lib/salesCaseMetrics";
 import { normalizeCaseStatus, type ProjectOption, type SalesCasePayoutRecord, type SalesCaseRecord } from "./SalesCaseModal";
 
@@ -23,6 +30,22 @@ type ProfileOption = {
   role: string | null;
   rank: string | null;
   recruit_by: string | null;
+};
+
+type FinanceEntryRecord = {
+  id: string;
+  entry_type: "cash_in" | "cash_out";
+  amount: number;
+  description: string | null;
+  entry_scope?: string | null;
+  reference_detail: string | null;
+  attachment_url: string | null;
+  transacted_at: string;
+};
+
+type VoucherHistoryMeta = {
+  payoutIds?: string[];
+  grossAmount?: number;
 };
 
 type DashboardProps = {
@@ -73,6 +96,40 @@ const isLeaderProfile = (profile: Pick<ProfileOption, "role" | "rank"> | null | 
 const isPreLeaderProfile = (profile: Pick<ProfileOption, "rank"> | null | undefined) =>
   Boolean(profile && profile.rank === "pre_leader");
 
+const HISTORY_META_SEPARATOR = "|||META|||";
+
+const parseVoucherHistoryMeta = (referenceDetail: string | null | undefined) => {
+  const rawDetail = (referenceDetail ?? "").trim();
+  const [, metaPayload] = rawDetail.split(HISTORY_META_SEPARATOR);
+
+  if (!metaPayload) {
+    return null;
+  }
+
+  try {
+    const [metaJson] = metaPayload.split(" | ");
+    return JSON.parse(metaJson) as VoucherHistoryMeta;
+  } catch {
+    return null;
+  }
+};
+
+const isReleasedHoldingTopUp = (payout: SalesCasePayoutRecord) => {
+  if (payout.payout_type !== "tier_upgrade_top_up") {
+    return false;
+  }
+
+  const source = (payout.source_commission_structure_id ?? "").toLowerCase();
+  const target = (payout.target_commission_structure_id ?? "").toLowerCase();
+  const sourceLabel = (payout.source_commission_structure_label ?? "").toLowerCase();
+  const targetLabel = (payout.target_commission_structure_label ?? "").toLowerCase();
+
+  const sourceMatches = source === "holding_commission" || sourceLabel === "holding commission";
+  const targetMatches = target === "released" || targetLabel === "released";
+
+  return sourceMatches && targetMatches;
+};
+
 export function Dashboard({ role, rank, userId }: DashboardProps) {
   const [events, setEvents] = useState<EventSummary[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -81,6 +138,7 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [payouts, setPayouts] = useState<SalesCasePayoutRecord[]>([]);
+  const [entries, setEntries] = useState<FinanceEntryRecord[]>([]);
 
   const isSuperAdmin = role === "super_admin";
   const isAdmin = role === "admin";
@@ -117,7 +175,7 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
     }
 
     const loadSummaryData = async () => {
-      const [caseResult, payoutResult, projectResult, profileResult] = await Promise.all([
+      const [caseResult, payoutResult, entryResult, projectResult, profileResult] = await Promise.all([
         supabase.from("sales_cases").select("*").order("created_at", { ascending: false }),
         supabase
           .from("sales_case_payouts")
@@ -125,6 +183,11 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
           .in("payout_status", ["Pending", "Approve", "Paid"])
           .order("paid_at", { ascending: false })
           .order("approved_at", { ascending: false })
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("finance_entries")
+          .select("id, entry_type, amount, description, entry_scope, reference_detail, attachment_url, transacted_at")
+          .order("transacted_at", { ascending: false })
           .order("created_at", { ascending: false }),
         supabase
           .from("projects")
@@ -140,6 +203,11 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
 
       setCases((caseResult.data as SalesCaseRecord[]) ?? []);
       setPayouts((payoutResult.data as SalesCasePayoutRecord[]) ?? []);
+      setEntries(
+        ((entryResult.data as FinanceEntryRecord[]) ?? []).filter(
+          (entry) => entry.entry_scope !== "company_commission_hidden"
+        )
+      );
       setProjects((projectResult.data as ProjectOption[]) ?? []);
       setProfiles((profileResult.data as ProfileOption[]) ?? []);
     };
@@ -194,6 +262,272 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
   }, [profiles]);
 
   const currentProfile = useMemo(() => (userId ? profileMap.get(userId) ?? null : null), [profileMap, userId]);
+
+  const getViewerHoldingCommission = (record: SalesCaseRecord) => {
+    if (!userId) {
+      return 0;
+    }
+
+    const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
+    const commissionStructure = getCaseCommissionStructure(record, project);
+    const holdingPercentage = getHoldingCommissionPercentage(commissionStructure);
+    const holdingCommissionStructure = commissionStructure
+      ? buildCommissionStructureByTotalPercentage(
+          commissionStructure,
+          holdingPercentage,
+          `${commissionStructure.id}-holding`,
+          commissionStructure.label,
+        )
+      : null;
+
+    if (!project || holdingPercentage <= 0 || !commissionStructure || !holdingCommissionStructure) {
+      return 0;
+    }
+
+    const viewerProfile = profileMap.get(userId) ?? null;
+    const creatorProfile = record.created_by
+      ? record.created_by === userId
+        ? viewerProfile
+        : profileMap.get(record.created_by) ?? null
+      : null;
+    const explicitInvolvedProfileId = getStoredInvolvedProfileId(record);
+    const involvedProfile = explicitInvolvedProfileId
+      ? explicitInvolvedProfileId === userId
+        ? viewerProfile
+        : profileMap.get(explicitInvolvedProfileId) ?? null
+      : null;
+
+    if (!viewerProfile) {
+      return 0;
+    }
+
+    const participantIds = Array.from(
+      new Set([record.created_by, explicitInvolvedProfileId].filter(Boolean))
+    ) as string[];
+
+    const participants = [creatorProfile, involvedProfile].filter(
+      (profile, index, array): profile is ProfileOption =>
+        Boolean(profile) && array.findIndex((item) => item?.id === profile?.id) === index
+    );
+
+    if (participantIds.length === 0) {
+      return 0;
+    }
+
+    const splitAgentPercentage = (holdingCommissionStructure.agent_commission ?? 0) / participantIds.length;
+    const splitPreLeaderPercentage = (holdingCommissionStructure.pre_leader_override ?? 0) / participantIds.length;
+    const splitLeaderPercentage = (holdingCommissionStructure.leader_override ?? 0) / participantIds.length;
+    let totalPercentage = 0;
+
+    const getHoldingLeaderChain = (
+      profile: ProfileOption | null,
+      visitedIds = new Set<string>()
+    ): { preLeader: ProfileOption | null; leader: ProfileOption | null } => {
+      if (!profile) {
+        return { preLeader: null, leader: null };
+      }
+
+      if (visitedIds.has(profile.id)) {
+        return { preLeader: null, leader: null };
+      }
+
+      const nextVisitedIds = new Set(visitedIds);
+      nextVisitedIds.add(profile.id);
+
+      if (profile.rank === "leader") {
+        return { preLeader: null, leader: profile };
+      }
+
+      const recruiter = profile.recruit_by ? profileMap.get(profile.recruit_by) ?? null : null;
+
+      if (!recruiter) {
+        return { preLeader: null, leader: null };
+      }
+
+      if (recruiter.rank === "leader") {
+        return { preLeader: null, leader: recruiter };
+      }
+
+      if (recruiter.rank === "pre_leader") {
+        const leader = recruiter.recruit_by ? profileMap.get(recruiter.recruit_by) ?? null : null;
+        return { preLeader: recruiter, leader };
+      }
+
+      if (recruiter.rank === "agent") {
+        return getHoldingLeaderChain(recruiter, nextVisitedIds);
+      }
+
+      return { preLeader: null, leader: null };
+    };
+
+    participants.forEach((participant) => {
+      const chain = getHoldingLeaderChain(participant);
+
+      if (participant.id === userId) {
+        totalPercentage += splitAgentPercentage;
+      }
+
+      if (participant.rank === "agent") {
+        const preLeaderRecipient = chain.preLeader ?? chain.leader;
+
+        if (preLeaderRecipient?.id === userId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+
+        if (chain.leader?.id === userId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+
+        return;
+      }
+
+      if (participant.rank === "pre_leader") {
+        if (participant.id === userId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+
+        if (chain.leader?.id === userId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+
+        return;
+      }
+
+      if (participant.rank === "leader" && participant.id === userId) {
+        totalPercentage += splitPreLeaderPercentage + splitLeaderPercentage;
+      }
+    });
+
+    return (record.nett_price ?? 0) * (totalPercentage / 100);
+  };
+
+  const getViewerCommission = (record: SalesCaseRecord) => {
+    if (!userId) {
+      return null;
+    }
+
+    const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
+    const commissionStructure = getCaseCommissionStructure(record, project);
+    const directPercentage = getDirectCommissionPercentage(commissionStructure);
+    const directCommissionStructure = commissionStructure
+      ? buildCommissionStructureByTotalPercentage(
+          commissionStructure,
+          directPercentage,
+          `${commissionStructure.id}-direct`,
+          commissionStructure.label,
+        )
+      : null;
+    const viewerProfile = profileMap.get(userId) ?? null;
+    const creatorProfile = record.created_by
+      ? record.created_by === userId
+        ? viewerProfile
+        : profileMap.get(record.created_by) ?? null
+      : null;
+    const involvedUserId = getStoredInvolvedProfileId(record);
+    const involvedProfile = involvedUserId
+      ? involvedUserId === userId
+        ? viewerProfile
+        : profileMap.get(involvedUserId) ?? null
+      : null;
+
+    if (!project || !viewerProfile || !commissionStructure || !directCommissionStructure) {
+      return null;
+    }
+
+    const participantIds = Array.from(
+      new Set([record.created_by, involvedUserId].filter(Boolean))
+    ) as string[];
+
+    const participants = [creatorProfile, involvedProfile].filter(
+      (profile, index, array): profile is ProfileOption =>
+        Boolean(profile) && array.findIndex((item) => item?.id === profile?.id) === index
+    );
+
+    if (participantIds.length === 0) {
+      return null;
+    }
+
+    const splitAgentPercentage = (directCommissionStructure.agent_commission ?? 0) / participantIds.length;
+    const splitPreLeaderPercentage = (directCommissionStructure.pre_leader_override ?? 0) / participantIds.length;
+    const splitLeaderPercentage = (directCommissionStructure.leader_override ?? 0) / participantIds.length;
+    let totalPercentage = 0;
+
+    const getLeaderChain = (
+      profile: ProfileOption | null,
+      visitedIds = new Set<string>()
+    ): { preLeader: ProfileOption | null; leader: ProfileOption | null } => {
+      if (!profile) {
+        return { preLeader: null, leader: null };
+      }
+
+      if (visitedIds.has(profile.id)) {
+        return { preLeader: null, leader: null };
+      }
+
+      const nextVisitedIds = new Set(visitedIds);
+      nextVisitedIds.add(profile.id);
+
+      if (profile.rank === "leader") {
+        return { preLeader: null, leader: profile };
+      }
+
+      const recruiter = profile.recruit_by ? profileMap.get(profile.recruit_by) ?? null : null;
+
+      if (!recruiter) {
+        return { preLeader: null, leader: null };
+      }
+
+      if (recruiter.rank === "leader") {
+        return { preLeader: null, leader: recruiter };
+      }
+
+      if (recruiter.rank === "pre_leader") {
+        const leader = recruiter.recruit_by ? profileMap.get(recruiter.recruit_by) ?? null : null;
+        return { preLeader: recruiter, leader };
+      }
+
+      if (recruiter.rank === "agent") {
+        return getLeaderChain(recruiter, nextVisitedIds);
+      }
+
+      return { preLeader: null, leader: null };
+    };
+
+    participants.forEach((participant) => {
+      const chain = getLeaderChain(participant);
+
+      if (participant.id === userId) {
+        totalPercentage += splitAgentPercentage;
+      }
+
+      if (participant.rank === "agent") {
+        const preLeaderRecipient = chain.preLeader ?? chain.leader;
+        if (preLeaderRecipient?.id === userId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+        if (chain.leader?.id === userId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+        return;
+      }
+
+      if (participant.rank === "pre_leader") {
+        if (participant.id === userId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+        if (chain.leader?.id === userId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+        return;
+      }
+
+      if (participant.rank === "leader" && participant.id === userId) {
+        totalPercentage += splitPreLeaderPercentage + splitLeaderPercentage;
+      }
+    });
+
+    return (record.nett_price ?? 0) * (totalPercentage / 100);
+  };
 
   const downlineIds = useMemo(() => {
     if (!currentProfile || !canViewMemberMetrics) {
@@ -309,22 +643,51 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
   );
 
   const totalMonthlySalesCommission = useMemo(
-    () =>
-      filteredCaseRows.reduce((sum, record) => {
+    () => {
+      const filteredCaseIds = new Set(filteredCaseRows.map((record) => record.id));
+
+      const salesDirect = filteredCaseRows.reduce((sum, record) => {
         const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
 
         return sum + getCaseCommissionAmountForProfiles(record, project, profiles, memberProfileIds);
-      }, 0),
-    [filteredCaseRows, memberProfileIds, profiles, projectMap]
+      }, 0);
+
+      const salesTopUp = payouts
+        .filter(
+          (payout) =>
+            payout.payout_type === "tier_upgrade_top_up" &&
+            filteredCaseIds.has(payout.sales_case_id) &&
+            memberProfileIds.has(payout.profile_id)
+        )
+        .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
+
+      return salesDirect + salesTopUp;
+    },
+    [filteredCaseRows, memberProfileIds, payouts, profiles, projectMap]
   );
 
   const totalMonthlyConvertedCommission = useMemo(
-    () =>
-      filteredCaseRows.reduce(
+    () => {
+      const filteredCaseIds = new Set(filteredCaseRows.map((record) => record.id));
+
+      const convertedDirect = filteredCaseRows.reduce(
         (sum, record) => sum + getCompletedCommissionAmountForProfiles(payoutMap.get(record.id) ?? [], memberProfileIds),
         0
-      ),
-    [filteredCaseRows, memberProfileIds, payoutMap]
+      );
+
+      const convertedTopUp = payouts
+        .filter(
+          (payout) =>
+            payout.payout_type === "tier_upgrade_top_up" &&
+            payout.payout_status === "Paid" &&
+            filteredCaseIds.has(payout.sales_case_id) &&
+            memberProfileIds.has(payout.profile_id)
+        )
+        .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
+
+      return convertedDirect + convertedTopUp;
+    },
+    [filteredCaseRows, memberProfileIds, payoutMap, payouts]
   );
 
   const totalMonthlyCaseCount = useMemo(() => filteredCaseRows.length, [filteredCaseRows]);
@@ -345,22 +708,133 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
       return 0;
     }
 
-    return memberCaseRows.reduce(
-      (sum, record) => sum + getCompletedCommissionAmountForProfiles(payoutMap.get(record.id) ?? [], [userId]),
+    type PersonalRow = {
+      createdAt: string | null;
+      displayStatus: string;
+      displayCommission: number | null;
+    };
+
+    const directAndHoldingRows: PersonalRow[] = memberCaseRows.flatMap((record) => {
+      const relatedPayouts = (payoutMap.get(record.id) ?? []).filter(
+        (payout) => payout.payout_type !== "tier_upgrade_top_up"
+      );
+      const viewerPayout = relatedPayouts.find((payout) => payout.profile_id === userId) ?? null;
+      const baseStatus = normalizeCaseStatus(record.status);
+      const directStatus = viewerPayout?.payout_status === "Paid" ? "Completed" : baseStatus;
+      const directRow: PersonalRow = {
+        createdAt: record.created_at,
+        displayStatus: directStatus,
+        displayCommission: getViewerCommission(record),
+      };
+
+      const hasReleasedHolding = payouts.some(
+        (payout) =>
+          payout.sales_case_id === record.id &&
+          payout.profile_id === userId &&
+          isReleasedHoldingTopUp(payout)
+      );
+      const holdingAmount = getViewerHoldingCommission(record);
+
+      if (hasReleasedHolding || holdingAmount <= 0) {
+        return [directRow];
+      }
+
+      return [
+        directRow,
+        {
+          createdAt: record.created_at,
+          displayStatus: directStatus,
+          displayCommission: holdingAmount,
+        },
+      ];
+    });
+
+    const topUpRows: PersonalRow[] = payouts
+      .filter((payout) => payout.payout_type === "tier_upgrade_top_up" && payout.profile_id === userId)
+      .flatMap((payout) => {
+        const relatedCase = cases.find((record) => record.id === payout.sales_case_id) ?? null;
+
+        if (!relatedCase) {
+          return [];
+        }
+
+        return [{
+          createdAt: payout.created_at,
+          displayStatus: payout.payout_status === "Paid" ? "Completed" : payout.payout_status,
+          displayCommission: payout.total_amount,
+        }];
+      });
+
+    const allRows = [...directAndHoldingRows, ...topUpRows].filter((row) => {
+      const rowDate = getLocalDateValueFromTimestamp(row.createdAt);
+      return Boolean(rowDate && rowDate >= defaultFromDate && rowDate <= defaultToDate);
+    });
+
+    return allRows.reduce(
+      (sum, row) => sum + (row.displayStatus === "Completed" ? row.displayCommission ?? 0 : 0),
       0
     );
-  }, [memberCaseRows, payoutMap, userId]);
+  }, [cases, defaultFromDate, defaultToDate, memberCaseRows, payoutMap, payouts, userId]);
 
   const totalPersonalMonthlySales = useMemo(() => {
     if (!userId) {
       return 0;
     }
 
-    return memberCaseRows.reduce((sum, record) => {
-      const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
-      return sum + getCaseCommissionAmountForProfiles(record, project, profiles, [userId]);
-    }, 0);
-  }, [memberCaseRows, profiles, projectMap, userId]);
+    type PersonalRow = {
+      createdAt: string | null;
+      displayCommission: number | null;
+    };
+
+    const directAndHoldingRows: PersonalRow[] = memberCaseRows.flatMap((record) => {
+      const directRow: PersonalRow = {
+        createdAt: record.created_at,
+        displayCommission: getViewerCommission(record),
+      };
+
+      const hasReleasedHolding = payouts.some(
+        (payout) =>
+          payout.sales_case_id === record.id &&
+          payout.profile_id === userId &&
+          isReleasedHoldingTopUp(payout)
+      );
+      const holdingAmount = getViewerHoldingCommission(record);
+
+      if (hasReleasedHolding || holdingAmount <= 0) {
+        return [directRow];
+      }
+
+      return [
+        directRow,
+        {
+          createdAt: record.created_at,
+          displayCommission: holdingAmount,
+        },
+      ];
+    });
+
+    const topUpRows: PersonalRow[] = payouts
+      .filter((payout) => payout.payout_type === "tier_upgrade_top_up" && payout.profile_id === userId)
+      .flatMap((payout) => {
+        const relatedCase = cases.find((record) => record.id === payout.sales_case_id) ?? null;
+
+        if (!relatedCase) {
+          return [];
+        }
+
+        return [{
+          createdAt: payout.created_at,
+          displayCommission: payout.total_amount,
+        }];
+      });
+
+    const allRows = [...directAndHoldingRows, ...topUpRows].filter((row) => {
+      const rowDate = getLocalDateValueFromTimestamp(row.createdAt);
+      return Boolean(rowDate && rowDate >= defaultFromDate && rowDate <= defaultToDate);
+    });
+
+    return allRows.reduce((sum, row) => sum + (row.displayCommission ?? 0), 0);
+  }, [cases, defaultFromDate, defaultToDate, memberCaseRows, payoutMap, payouts, userId]);
 
   const totalPersonalMonthlyCaseCount = useMemo(() => memberCaseRows.length, [memberCaseRows]);
 
@@ -405,43 +879,149 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
     () =>
       memberTeamCaseRows.reduce((sum, record) => {
         const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
-        return sum + getCaseCommissionAmountForProfiles(record, project, profiles, teamMemberIds);
+        const allRelatedPayouts = payoutMap.get(record.id) ?? [];
+        const releasedHoldingPayouts = allRelatedPayouts.filter((payout) => isReleasedHoldingTopUp(payout));
+
+        return (
+          sum +
+          getCaseCommissionAmountForProfiles(record, project, profiles, teamMemberIds) +
+          releasedHoldingPayouts.reduce(
+            (releasedSum, payout) =>
+              teamMemberIds.has(payout.profile_id)
+                ? releasedSum + Number(payout.total_amount ?? 0)
+                : releasedSum,
+            0
+          )
+        );
       }, 0),
-    [memberTeamCaseRows, profiles, projectMap, teamMemberIds]
+    [memberTeamCaseRows, payoutMap, profiles, projectMap, teamMemberIds]
   );
 
   const totalTeamMonthlyConvertedCommission = useMemo(
     () =>
-      memberTeamCaseRows.reduce(
-        (sum, record) => sum + getCompletedCommissionAmountForProfiles((payoutMap.get(record.id) ?? []).filter((payout) => payout.payout_type !== "tier_upgrade_top_up"), teamMemberIds),
-        0
-      ),
+      memberTeamCaseRows.reduce((sum, record) => {
+        const allRelatedPayouts = payoutMap.get(record.id) ?? [];
+        const relatedPayouts = allRelatedPayouts.filter(
+          (payout) => payout.payout_type !== "tier_upgrade_top_up" || isReleasedHoldingTopUp(payout)
+        );
+
+        const completedDirectAndReleased = getCompletedCommissionAmountForProfiles(relatedPayouts, teamMemberIds);
+        const completedTopUp = allRelatedPayouts
+          .filter(
+            (payout) =>
+              payout.payout_type === "tier_upgrade_top_up" &&
+              payout.payout_status === "Paid" &&
+              teamMemberIds.has(payout.profile_id)
+          )
+          .reduce((topUpSum, payout) => topUpSum + Number(payout.total_amount ?? 0), 0);
+
+        return sum + completedDirectAndReleased + completedTopUp;
+      }, 0),
     [memberTeamCaseRows, payoutMap, teamMemberIds]
   );
 
   const totalPaidOutToAgent = useMemo(
-    () =>
-      payouts.reduce((sum, payout) => {
+    () => {
+      const voucherPayoutIds = new Set<string>();
+      const voucherAttachmentUrls = new Set<string>();
+
+      entries.forEach((entry) => {
+        if (entry.description !== "Payment voucher generated") {
+          return;
+        }
+
+        if (entry.attachment_url) {
+          voucherAttachmentUrls.add(entry.attachment_url);
+        }
+
+        const meta = parseVoucherHistoryMeta(entry.reference_detail);
+        (meta?.payoutIds ?? []).forEach((payoutId) => {
+          if (payoutId) {
+            voucherPayoutIds.add(payoutId);
+          }
+        });
+      });
+
+      const payoutCashOut = payouts.reduce((sum, payout) => {
         const paidAt = getLocalDateValueFromTimestamp(payout.paid_at);
 
         if (
           payout.payout_status !== "Paid" ||
-          payout.payout_type === "tier_upgrade_top_up" ||
           !paidAt ||
           paidAt < defaultFromDate ||
-          paidAt > defaultToDate
+          paidAt > defaultToDate ||
+          voucherPayoutIds.has(payout.id) ||
+          (payout.payment_receipt_url && voucherAttachmentUrls.has(payout.payment_receipt_url))
         ) {
           return sum;
         }
 
-        return sum + (payout.total_amount ?? 0);
-      }, 0),
-    [defaultFromDate, defaultToDate, payouts]
+        return sum + Number(payout.total_amount ?? 0);
+      }, 0);
+
+      const voucherCashOut = entries.reduce((sum, entry) => {
+        const transactedAt = getLocalDateValueFromTimestamp(entry.transacted_at);
+
+        if (
+          entry.entry_type !== "cash_out" ||
+          entry.description !== "Payment voucher generated" ||
+          !transactedAt ||
+          transactedAt < defaultFromDate ||
+          transactedAt > defaultToDate
+        ) {
+          return sum;
+        }
+
+        const historyMeta = parseVoucherHistoryMeta(entry.reference_detail);
+        const displayAmount = Number((historyMeta?.grossAmount ?? entry.amount).toFixed(2));
+        return sum + displayAmount;
+      }, 0);
+
+      return payoutCashOut + voucherCashOut;
+    },
+    [defaultFromDate, defaultToDate, entries, payouts]
   );
 
-  const totalPaidOutNonAgent = 0;
-  const totalCashIn = 0;
-  const totalCashOut = totalPaidOutToAgent;
+  const totalPaidOutNonAgent = useMemo(
+    () =>
+      entries.reduce((sum, entry) => {
+        const transactedAt = getLocalDateValueFromTimestamp(entry.transacted_at);
+
+        if (
+          entry.entry_type !== "cash_out" ||
+          entry.description === "Payment voucher generated" ||
+          !transactedAt ||
+          transactedAt < defaultFromDate ||
+          transactedAt > defaultToDate
+        ) {
+          return sum;
+        }
+
+        return sum + Number(entry.amount ?? 0);
+      }, 0),
+    [defaultFromDate, defaultToDate, entries]
+  );
+
+  const totalCashIn = useMemo(
+    () =>
+      entries.reduce((sum, entry) => {
+        const transactedAt = getLocalDateValueFromTimestamp(entry.transacted_at);
+
+        if (
+          entry.entry_type !== "cash_in" ||
+          !transactedAt ||
+          transactedAt < defaultFromDate ||
+          transactedAt > defaultToDate
+        ) {
+          return sum;
+        }
+
+        return sum + Number(entry.amount ?? 0);
+      }, 0),
+    [defaultFromDate, defaultToDate, entries]
+  );
+
+  const totalCashOut = totalPaidOutToAgent + totalPaidOutNonAgent;
 
   const monthlyChartData = useMemo(() => {
     const months = Array.from({ length: 12 }, (_, index) => {

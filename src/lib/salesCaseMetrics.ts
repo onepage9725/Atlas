@@ -1,4 +1,8 @@
-import { getCaseCommissionStructure } from "./commissionStructures";
+import {
+  getCaseCommissionStructure,
+  getDirectCommissionPercentage,
+} from "./commissionStructures";
+import { buildCommissionStructureByTotalPercentage } from "./salesCasePayouts";
 import type { ProjectOption, SalesCasePayoutRecord, SalesCaseRecord } from "../components/SalesCaseModal";
 
 type CommissionProfile = {
@@ -122,13 +126,24 @@ export const getCaseCommissionAmountForProfile = (
   }
 
   const commissionStructure = getCaseCommissionStructure(record, project);
+  if (!commissionStructure) {
+    return 0;
+  }
+
+  const directPercentage = getDirectCommissionPercentage(commissionStructure);
+  const directCommissionStructure = buildCommissionStructureByTotalPercentage(
+    commissionStructure,
+    directPercentage,
+    `${commissionStructure.id}-direct`,
+    commissionStructure.label,
+  );
   const profileMap = new Map(profiles.map((profile) => [profile.id, profile]));
   const viewerProfile = profileMap.get(profileId) ?? null;
   const creatorProfile = record.created_by ? profileMap.get(record.created_by) ?? null : null;
   const involvedUserId = getStoredInvolvedProfileId(record);
   const involvedProfile = involvedUserId ? profileMap.get(involvedUserId) ?? null : null;
 
-  if (!project || !viewerProfile || !commissionStructure) {
+  if (!project || !viewerProfile || !directCommissionStructure) {
     return 0;
   }
 
@@ -142,9 +157,9 @@ export const getCaseCommissionAmountForProfile = (
     return 0;
   }
 
-  const splitAgentPercentage = (commissionStructure.agent_commission ?? 0) / participantIds.length;
-  const splitPreLeaderPercentage = (commissionStructure.pre_leader_override ?? 0) / participantIds.length;
-  const splitLeaderPercentage = (commissionStructure.leader_override ?? 0) / participantIds.length;
+  const splitAgentPercentage = (directCommissionStructure.agent_commission ?? 0) / participantIds.length;
+  const splitPreLeaderPercentage = (directCommissionStructure.pre_leader_override ?? 0) / participantIds.length;
+  const splitLeaderPercentage = (directCommissionStructure.leader_override ?? 0) / participantIds.length;
   let totalPercentage = 0;
 
   participants.forEach((participant) => {
@@ -206,13 +221,15 @@ export const getCompletedCommissionAmountForProfiles = (
   payouts: SalesCasePayoutRecord[],
   profileIds: Iterable<string>
 ) => {
-  const standardPayouts = getStandardPayouts(payouts);
+  const paidStandardPayouts = getStandardPayouts(payouts).filter(
+    (payout) => payout.payout_status === "Paid"
+  );
 
-  if (standardPayouts.length === 0 || !standardPayouts.every((payout) => payout.payout_status === "Paid")) {
+  if (paidStandardPayouts.length === 0) {
     return 0;
   }
 
-  return getPayoutCommissionAmountForProfiles(standardPayouts, profileIds);
+  return getPayoutCommissionAmountForProfiles(paidStandardPayouts, profileIds);
 };
 
 export const getPayoutCommissionAmountForProfiles = (

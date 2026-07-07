@@ -1,16 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, EyeOff, Pencil, Plus, Save, Trash2, Upload, X } from "lucide-react";
-import { buildTierUpgradeTopUpStructure, buildPayoutRowsForCommissionStructure } from "../lib/salesCasePayouts";
+import { Download, EyeOff, Pencil, Save, Trash2, Upload, X } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 import {
-  getCaseCommissionStructure,
-  getDefaultProjectCommissionStructure,
   getCommissionStructureLabel,
   getProjectCommissionStructures,
-  getShortCommissionStructureLabel,
   type CommissionStructure,
 } from "../lib/commissionStructures";
-import type { SalesCasePayoutRecord, SalesCaseStatus } from "./SalesCaseModal";
 
 const PROJECT_TYPE_OPTIONS = ["Residential", "Commercial", "Mixed Development", "Others"] as const;
 const PROPERTY_CATEGORY_OPTIONS = ["Condo", "Landed", "SOHO", "Shop Office", "Others"] as const;
@@ -40,6 +35,8 @@ type ProjectRecord = {
   agent_commission: number | null;
   pre_leader_override: number | null;
   leader_override: number | null;
+  direct_commission: number | null;
+  holding_commission: number | null;
   commission_structures: CommissionStructure[] | null;
   default_commission_structure_id: string | null;
   launch_date: string | null;
@@ -51,23 +48,6 @@ type ProjectRecord = {
   attachment_2_url: string | null;
   attachment_2_label: string | null;
   created_at: string;
-};
-
-type EligibleSalesCaseRecord = {
-  id: string;
-  project_id: string | null;
-  status: SalesCaseStatus | null;
-  created_by: string | null;
-  involved_profile_id: string | null;
-  involved_user_ids: string[] | null;
-  nett_price: number | null;
-  commission_structure: CommissionStructure | null;
-};
-
-type PayoutProfileRecord = {
-  id: string;
-  rank: string | null;
-  recruit_by: string | null;
 };
 
 type ProjectsFormProps = {
@@ -85,6 +65,15 @@ type CommissionStructureForm = {
   agentCommission: string;
   preLeaderOverride: string;
   leaderOverride: string;
+  directCommission: string;
+  holdingCommission: string;
+};
+
+type HoldingShareBreakdown = {
+  companyShare: number;
+  agentShare: number;
+  preLeaderShare: number;
+  leaderShare: number;
 };
 
 const createTierId = () => `tier-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -99,6 +88,8 @@ const createEmptyCommissionStructure = (index: number): CommissionStructureForm 
   agentCommission: "",
   preLeaderOverride: "",
   leaderOverride: "",
+  directCommission: "",
+  holdingCommission: "",
 });
 
 const createEmptyForm = () => ({
@@ -122,7 +113,7 @@ const createEmptyForm = () => ({
   sizeMax: "",
   tenure: "Freehold",
   commissionStructures: [createEmptyCommissionStructure(1)],
-  defaultCommissionStructureId: "",
+  defaultCommissionStructureId: "default-tier",
   launchDate: "",
   completionDate: "",
   status: "Coming Soon",
@@ -161,20 +152,34 @@ const formatEditableCommissionValue = (value: number | null) => {
   return value.toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
 };
 
-const getTierUnitsSummary = (minUnits: string, maxUnits: string) => {
-  if (minUnits && maxUnits) {
-    return `${minUnits} - ${maxUnits} units`;
+const toCommissionNumber = (value: string) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const getHoldingShareBreakdown = (structure: CommissionStructureForm): HoldingShareBreakdown => {
+  const company = toCommissionNumber(structure.companyCommission);
+  const agent = toCommissionNumber(structure.agentCommission);
+  const preLeader = toCommissionNumber(structure.preLeaderOverride);
+  const leader = toCommissionNumber(structure.leaderOverride);
+  const holding = toCommissionNumber(structure.holdingCommission);
+  const totalBreakdown = company + agent + preLeader + leader;
+
+  if (holding <= 0 || totalBreakdown <= 0) {
+    return {
+      companyShare: 0,
+      agentShare: 0,
+      preLeaderShare: 0,
+      leaderShare: 0,
+    };
   }
 
-  if (minUnits) {
-    return `${minUnits}+ units`;
-  }
-
-  if (maxUnits) {
-    return `Up to ${maxUnits} units`;
-  }
-
-  return "All units";
+  return {
+    companyShare: Number(((holding * company) / totalBreakdown).toFixed(3)),
+    agentShare: Number(((holding * agent) / totalBreakdown).toFixed(3)),
+    preLeaderShare: Number(((holding * preLeader) / totalBreakdown).toFixed(3)),
+    leaderShare: Number(((holding * leader) / totalBreakdown).toFixed(3)),
+  };
 };
 
 const formatDate = (value: string | null) => {
@@ -250,140 +255,11 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
   const attachment2InputRef = useRef<HTMLInputElement | null>(null);
   const previewUrlRef = useRef<string | null>(null);
 
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState("");
   const canManageProjects = role === "admin" || role === "super_admin";
-  const canViewHiddenProjects = role === "super_admin";
+  const canDeleteProjects = role === "super_admin";
+  const canViewHiddenProjects = canManageProjects;
   const projectCount = useMemo(() => projects.length, [projects]);
-
-  const generateTierUpgradeTopUps = async (
-    projectId: string,
-    previousStructure: CommissionStructure,
-    nextStructure: CommissionStructure,
-  ) => {
-    const topUpStructure = buildTierUpgradeTopUpStructure(previousStructure, nextStructure);
-
-    if (!topUpStructure) {
-      return { createdCount: 0, skippedCount: 0 };
-    }
-
-    const { data: caseData, error: caseError } = await supabase
-      .from("sales_cases")
-      .select(
-        "id, project_id, status, created_by, involved_profile_id, involved_user_ids, nett_price, commission_structure"
-      )
-      .eq("project_id", projectId)
-      .in("status", ["Approve", "Paid"]);
-
-    if (caseError) {
-      throw caseError;
-    }
-
-    const caseRecords = (caseData as EligibleSalesCaseRecord[]) ?? [];
-    const caseIds = caseRecords.map((record) => record.id);
-
-    const { data: priorTopUpData, error: priorTopUpError } = caseIds.length
-      ? await supabase
-          .from("sales_case_payouts")
-          .select("sales_case_id")
-          .eq("payout_type", "tier_upgrade_top_up")
-          .eq("target_commission_structure_id", previousStructure.id)
-          .in("sales_case_id", caseIds)
-      : { data: [], error: null };
-
-    if (priorTopUpError) {
-      throw priorTopUpError;
-    }
-
-    const priorTopUpCaseIds = new Set(
-      (((priorTopUpData as Array<Pick<SalesCasePayoutRecord, "sales_case_id">>) ?? [])).map((row) => row.sales_case_id),
-    );
-
-    const eligibleCases = caseRecords.filter((record) => {
-      const caseStructure = getCaseCommissionStructure(record, null);
-      return caseStructure?.id === previousStructure.id || priorTopUpCaseIds.has(record.id);
-    });
-
-    if (eligibleCases.length === 0) {
-      return { createdCount: 0, skippedCount: 0 };
-    }
-
-    const { data: profileData, error: profileError } = await supabase
-      .from("profiles")
-      .select("id, rank, recruit_by");
-
-    if (profileError) {
-      throw profileError;
-    }
-
-    const profilesById = new Map<string, PayoutProfileRecord>();
-    ((profileData as PayoutProfileRecord[]) ?? []).forEach((profile) => {
-      profilesById.set(profile.id, profile);
-    });
-
-    const eligibleCaseIds = eligibleCases.map((record) => record.id);
-    const { data: existingTopUpData, error: existingTopUpError } = await supabase
-      .from("sales_case_payouts")
-      .select("sales_case_id, profile_id")
-      .eq("payout_type", "tier_upgrade_top_up")
-      .eq("source_commission_structure_id", previousStructure.id)
-      .eq("target_commission_structure_id", nextStructure.id)
-      .in("sales_case_id", eligibleCaseIds);
-
-    if (existingTopUpError) {
-      throw existingTopUpError;
-    }
-
-    const existingTopUpKeys = new Set(
-      (((existingTopUpData as Array<Pick<SalesCasePayoutRecord, "sales_case_id" | "profile_id">>) ?? [])).map(
-        (row) => `${row.sales_case_id}:${row.profile_id}`,
-      ),
-    );
-
-    const sourceLabel =
-      getShortCommissionStructureLabel(getCommissionStructureLabel(previousStructure)) ?? previousStructure.id;
-    const targetLabel =
-      getShortCommissionStructureLabel(getCommissionStructureLabel(nextStructure)) ?? nextStructure.id;
-
-    const payoutPayload = eligibleCases.flatMap((record) =>
-      buildPayoutRowsForCommissionStructure(record, topUpStructure, profilesById)
-        .filter((row) => !existingTopUpKeys.has(`${record.id}:${row.profileId}`))
-        .map((row) => ({
-          sales_case_id: record.id,
-          profile_id: row.profileId,
-          payout_type: "tier_upgrade_top_up" as const,
-          source_commission_structure_id: previousStructure.id,
-          source_commission_structure_label: sourceLabel,
-          target_commission_structure_id: nextStructure.id,
-          target_commission_structure_label: targetLabel,
-          agent_commission_percentage: Number(row.agentCommissionPercentage.toFixed(3)),
-          pre_leader_override_percentage: Number(row.preLeaderOverridePercentage.toFixed(3)),
-          leader_override_percentage: Number(row.leaderOverridePercentage.toFixed(3)),
-          total_amount: Number(row.totalAmount.toFixed(2)),
-          payout_status: "Pending" as const,
-          payment_receipt_url: null,
-          approved_at: null,
-          approved_by: null,
-          rejected_at: null,
-          rejected_by: null,
-          paid_at: null,
-          paid_by: null,
-        })),
-    );
-
-    if (payoutPayload.length === 0) {
-      return { createdCount: 0, skippedCount: existingTopUpKeys.size };
-    }
-
-    const { error: insertError } = await supabase.from("sales_case_payouts").insert(payoutPayload);
-
-    if (insertError) {
-      throw insertError;
-    }
-
-    return {
-      createdCount: payoutPayload.length,
-      skippedCount: existingTopUpKeys.size,
-    };
-  };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -464,6 +340,8 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                 agentCommission: "",
                 preLeaderOverride: "",
                 leaderOverride: "",
+                directCommission: "",
+                holdingCommission: "",
               }
             : structure
         ),
@@ -491,39 +369,12 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
               agentCommission: normalizeNumber(total * 0.5),
               preLeaderOverride: normalizeNumber(total * 0.1),
               leaderOverride: normalizeNumber(total * 0.1),
+              directCommission: structure.directCommission || normalizeNumber(total),
+              holdingCommission: structure.holdingCommission || "0",
             }
           : structure
       ),
     }));
-  };
-
-  const addCommissionStructure = () => {
-    setFormData((prev) => ({
-      ...prev,
-      commissionStructures: [
-        ...prev.commissionStructures,
-        createEmptyCommissionStructure(prev.commissionStructures.length + 1),
-      ],
-    }));
-  };
-
-  const removeCommissionStructure = (structureId: string) => {
-    setFormData((prev) => {
-      if (prev.commissionStructures.length === 1) {
-        return prev;
-      }
-
-      const nextCommissionStructures = prev.commissionStructures.filter((structure) => structure.id !== structureId);
-
-      return {
-        ...prev,
-        commissionStructures: nextCommissionStructures,
-        defaultCommissionStructureId:
-          prev.defaultCommissionStructureId === structureId
-            ? nextCommissionStructures[0]?.id ?? ""
-            : prev.defaultCommissionStructureId,
-      };
-    });
   };
 
   const handleAttachmentChange = (
@@ -601,7 +452,27 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
   };
 
   const mapRecordToForm = (project: ProjectRecord) => {
-    const commissionStructures = getProjectCommissionStructures(project);
+    const commissionStructure = getProjectCommissionStructures(project)[0] ?? {
+      id: "default-tier",
+      label: "Default Tier",
+      min_units: null,
+      max_units: null,
+      company_commission: project.company_commission,
+      agent_commission: project.agent_commission,
+      pre_leader_override: project.pre_leader_override,
+      leader_override: project.leader_override,
+      direct_commission: project.direct_commission,
+      holding_commission: project.holding_commission,
+    };
+
+    const totalCommissionValue = [
+      commissionStructure.company_commission,
+      commissionStructure.agent_commission,
+      commissionStructure.pre_leader_override,
+      commissionStructure.leader_override,
+    ]
+      .filter((value) => typeof value === "number")
+      .reduce((sum, value) => sum + (value ?? 0), 0);
 
     setFormData({
       projectName: project.project_name ?? "",
@@ -635,31 +506,22 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
       sizeMin: project.size_min?.toString() ?? "",
       sizeMax: project.size_max?.toString() ?? "",
       tenure: project.tenure ?? "Freehold",
-      commissionStructures: commissionStructures.map((structure, index) => ({
-        id: structure.id,
-        label: structure.label ?? `Tier ${index + 1}`,
-        minUnits: structure.min_units?.toString() ?? "",
-        maxUnits: structure.max_units?.toString() ?? "",
-        totalCommission: formatEditableCommissionValue(
-          [
-            structure.company_commission,
-            structure.agent_commission,
-            structure.pre_leader_override,
-            structure.leader_override,
-          ]
-            .filter((value) => typeof value === "number")
-            .reduce((sum, value) => sum + (value ?? 0), 0)
+      commissionStructures: [{
+        id: "default-tier",
+        label: "Default Tier",
+        minUnits: "",
+        maxUnits: "",
+        totalCommission: formatEditableCommissionValue(totalCommissionValue),
+        companyCommission: formatEditableCommissionValue(commissionStructure.company_commission),
+        agentCommission: formatEditableCommissionValue(commissionStructure.agent_commission),
+        preLeaderOverride: formatEditableCommissionValue(commissionStructure.pre_leader_override),
+        leaderOverride: formatEditableCommissionValue(commissionStructure.leader_override),
+        directCommission: formatEditableCommissionValue(
+          commissionStructure.direct_commission ?? totalCommissionValue,
         ),
-        companyCommission: formatEditableCommissionValue(structure.company_commission),
-        agentCommission: formatEditableCommissionValue(structure.agent_commission),
-        preLeaderOverride: formatEditableCommissionValue(structure.pre_leader_override),
-        leaderOverride: formatEditableCommissionValue(structure.leader_override),
-      })),
-      defaultCommissionStructureId:
-        project.default_commission_structure_id &&
-        commissionStructures.some((structure) => structure.id === project.default_commission_structure_id)
-          ? project.default_commission_structure_id
-          : commissionStructures[0]?.id ?? "",
+        holdingCommission: formatEditableCommissionValue(commissionStructure.holding_commission ?? 0),
+      }],
+      defaultCommissionStructureId: "default-tier",
       launchDate: project.launch_date ?? "",
       completionDate: project.completion_date ?? "",
       status: project.status ?? "Coming Soon",
@@ -814,79 +676,31 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
       return;
     }
 
-    const normalizedCommissionStructures = formData.commissionStructures.map((structure, index) => ({
-      id: structure.id,
-      label: structure.label.trim() || `Tier ${index + 1}`,
-      min_units: toIntOrNull(structure.minUnits),
-      max_units: toIntOrNull(structure.maxUnits),
-      company_commission: toNumberOrNull(structure.companyCommission),
-      agent_commission: toNumberOrNull(structure.agentCommission),
-      pre_leader_override: toNumberOrNull(structure.preLeaderOverride),
-      leader_override: toNumberOrNull(structure.leaderOverride),
-    }));
-
-    if (normalizedCommissionStructures.length === 0) {
-      setError("Please add at least one commission structure.");
-      return;
-    }
-
-    if (
-      normalizedCommissionStructures.some(
-        (structure) =>
-          structure.min_units !== null &&
-          structure.max_units !== null &&
-          structure.min_units > structure.max_units
-      )
-    ) {
-      setError("One of the commission tier unit ranges is invalid. The minimum units cannot be more than the maximum.");
-      return;
-    }
-
-    if (
-      normalizedCommissionStructures.some(
-        (structure) =>
-          structure.company_commission === null &&
-          structure.agent_commission === null &&
-          structure.pre_leader_override === null &&
-          structure.leader_override === null
-      )
-    ) {
-      setError("Each commission structure must include at least one commission percentage.");
-      return;
-    }
-
-    if (!formData.defaultCommissionStructureId) {
-      setError("Please choose the current tier.");
-      return;
-    }
-
-    if (!normalizedCommissionStructures.some((structure) => structure.id === formData.defaultCommissionStructureId)) {
-      setError("Please choose a valid current tier.");
-      return;
-    }
+    const singleStructure = formData.commissionStructures[0] ?? createEmptyCommissionStructure(1);
+    const normalizedCommissionStructures = [{
+      id: "default-tier",
+      label: "Default Tier",
+      min_units: null,
+      max_units: null,
+      company_commission: toNumberOrNull(singleStructure.companyCommission),
+      agent_commission: toNumberOrNull(singleStructure.agentCommission),
+      pre_leader_override: toNumberOrNull(singleStructure.preLeaderOverride),
+      leader_override: toNumberOrNull(singleStructure.leaderOverride),
+      direct_commission: toNumberOrNull(singleStructure.directCommission),
+      holding_commission: toNumberOrNull(singleStructure.holdingCommission),
+    }];
 
     const primaryCommissionStructure = normalizedCommissionStructures[0];
-    const editingProject = editingId ? projects.find((project) => project.id === editingId) ?? null : null;
-    const previousDefaultStructure = getDefaultProjectCommissionStructure(editingProject);
-    const nextDefaultStructure = getDefaultProjectCommissionStructure({
-      commission_structures: normalizedCommissionStructures,
-      default_commission_structure_id: formData.defaultCommissionStructureId,
-    });
-    const tierUpgradeSourceStructure = previousDefaultStructure;
-    const shouldGenerateTopUps = Boolean(
-      editingId &&
-        tierUpgradeSourceStructure &&
-        nextDefaultStructure &&
-        tierUpgradeSourceStructure.id !== nextDefaultStructure.id &&
-        Boolean(buildTierUpgradeTopUpStructure(tierUpgradeSourceStructure, nextDefaultStructure)) &&
-        window.confirm(
-          `Default tier is changing from ${
-            previousDefaultStructure ? getCommissionStructureLabel(previousDefaultStructure) : "the previous tier"
-          } to ${getCommissionStructureLabel(nextDefaultStructure)}. Generate top-up payout rows for approved or paid cases that are still on ${getCommissionStructureLabel(
-            tierUpgradeSourceStructure,
-          )}?`,
-        ),
-    );
+
+    if (
+      primaryCommissionStructure.company_commission === null &&
+      primaryCommissionStructure.agent_commission === null &&
+      primaryCommissionStructure.pre_leader_override === null &&
+      primaryCommissionStructure.leader_override === null
+    ) {
+      setError("Please enter at least one commission percentage.");
+      return;
+    }
 
     setIsSubmitting(true);
     setError(null);
@@ -940,8 +754,10 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
         agent_commission: primaryCommissionStructure.agent_commission,
         pre_leader_override: primaryCommissionStructure.pre_leader_override,
         leader_override: primaryCommissionStructure.leader_override,
+        direct_commission: primaryCommissionStructure.direct_commission,
+        holding_commission: primaryCommissionStructure.holding_commission,
         commission_structures: normalizedCommissionStructures,
-        default_commission_structure_id: formData.defaultCommissionStructureId,
+        default_commission_structure_id: "default-tier",
         launch_date: formData.launchDate || null,
         completion_date: formData.completionDate || null,
         status: formData.status,
@@ -966,12 +782,6 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
         return;
       }
 
-      let topUpSummary: { createdCount: number; skippedCount: number } | null = null;
-
-      if (editingId && shouldGenerateTopUps && nextDefaultStructure && tierUpgradeSourceStructure) {
-        topUpSummary = await generateTierUpgradeTopUps(editingId, tierUpgradeSourceStructure, nextDefaultStructure);
-      }
-
       await fetchProjects();
       if (newUrl && oldUrl && newUrl !== oldUrl) {
         await deleteCoverImageFromStorage(oldUrl);
@@ -985,12 +795,6 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
       resetForm();
       setShowProjectModal(false);
       setIsSubmitting(false);
-
-      if (topUpSummary?.createdCount) {
-        window.alert(`Project updated. Generated ${topUpSummary.createdCount} tier upgrade top-up payout row(s).`);
-      } else if (topUpSummary && topUpSummary.skippedCount > 0) {
-        window.alert("Project updated. Matching tier top-up payout rows already existed, so no new rows were generated.");
-      }
     } catch (err) {
       if (uploadedCoverImageUrl) {
         await deleteCoverImageFromStorage(uploadedCoverImageUrl).catch(() => undefined);
@@ -1031,102 +835,51 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
       return;
     }
 
-    clearPreview();
+    setError(null);
+    resetForm();
     setEditingId(project.id);
     mapRecordToForm(project);
-    setCoverImageFile(null);
-    setAttachment1File(null);
-    setAttachment2File(null);
-    if (coverImageInputRef.current) {
-      coverImageInputRef.current.value = "";
-    }
-    if (attachment1InputRef.current) {
-      attachment1InputRef.current.value = "";
-    }
-    if (attachment2InputRef.current) {
-      attachment2InputRef.current.value = "";
-    }
     setShowProjectModal(true);
   };
 
-  const handleDelete = async (project: ProjectRecord) => {
-    if (!canManageProjects) {
+  const handleDeleteProject = async () => {
+    if (!pendingDeleteProject || !canDeleteProjects) {
       return;
     }
 
-    setError(null);
     setIsDeletingProject(true);
-
-    const { count: linkedCaseCount, error: linkedCaseError } = await supabase
-      .from("sales_cases")
-      .select("id", { count: "exact", head: true })
-      .eq("project_id", project.id);
-
-    if (linkedCaseError) {
-      setError(linkedCaseError.message);
-      setIsDeletingProject(false);
-      return;
-    }
-
-    if ((linkedCaseCount ?? 0) > 0) {
-      setError(
-        `This project cannot be deleted because ${linkedCaseCount} sales case${linkedCaseCount === 1 ? " is" : "s are"} still linked to it. Remove or reassign those cases first.`
-      );
-      setIsDeletingProject(false);
-      return;
-    }
-
-    const { error: deleteError } = await supabase.from("projects").delete().eq("id", project.id);
-    if (deleteError) {
-      if (deleteError.code === "23503") {
-        setError("This project cannot be deleted because other records are still linked to it. Remove those linked records first.");
-      } else {
-        setError(deleteError.message);
-      }
-      setIsDeletingProject(false);
-      return;
-    }
+    setError(null);
 
     try {
-      await Promise.all([
-        deleteCoverImageFromStorage(project.cover_image_url),
-        deleteProjectFileFromStorage(project.attachment_1_url),
-        deleteProjectFileFromStorage(project.attachment_2_url),
-      ]);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? `Project deleted, but attachment cleanup failed: ${err.message}`
-          : "Project deleted, but attachment cleanup failed."
-      );
-      await fetchProjects();
-      if (editingId === project.id) {
-        resetForm();
-        setShowProjectModal(false);
-      }
-      if (selectedProject?.id === project.id) {
-        setSelectedProject(null);
-      }
-      setPendingDeleteProject(null);
-      setIsDeletingProject(false);
-      return;
-    }
+      const { error: deleteError } = await supabase.from("projects").delete().eq("id", pendingDeleteProject.id);
 
-    await fetchProjects();
-    if (editingId === project.id) {
-      resetForm();
-      setShowProjectModal(false);
+      if (deleteError) {
+        throw deleteError;
+      }
+
+      if (pendingDeleteProject.cover_image_url) {
+        await deleteCoverImageFromStorage(pendingDeleteProject.cover_image_url).catch(() => undefined);
+      }
+      if (pendingDeleteProject.attachment_1_url) {
+        await deleteProjectFileFromStorage(pendingDeleteProject.attachment_1_url).catch(() => undefined);
+      }
+      if (pendingDeleteProject.attachment_2_url) {
+        await deleteProjectFileFromStorage(pendingDeleteProject.attachment_2_url).catch(() => undefined);
+      }
+
+      setProjects((prev) => prev.filter((p) => p.id !== pendingDeleteProject.id));
+      setPendingDeleteProject(null);
+      setDeleteConfirmationText("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to delete project.");
+    } finally {
+      setIsDeletingProject(false);
     }
-    if (selectedProject?.id === project.id) {
-      setSelectedProject(null);
-    }
-    setPendingDeleteProject(null);
-    setIsDeletingProject(false);
   };
 
   return (
     <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      <div className="mb-4 flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Projects</h2>
           <p className="text-gray-500 text-sm mt-1">Browse project launches, details, and specifications</p>
@@ -1158,7 +911,7 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
           )}
         </div>
 
-        <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {projects.map((project) => (
             <div
               key={project.id}
@@ -1174,7 +927,7 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
               className="overflow-hidden rounded-2xl border border-gray-100 bg-white text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md cursor-pointer"
             >
               <div className="bg-gradient-to-b from-slate-50 to-white px-5 pt-5">
-                <div className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-slate-100 shadow-sm">
+                <div className="relative aspect-[16/9] w-full overflow-hidden rounded-2xl bg-slate-100 shadow-sm">
                   {project.cover_image_url ? (
                     <img
                       src={project.cover_image_url}
@@ -1203,8 +956,8 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
 
               <div className="space-y-3 p-5">
                 <div>
-                  <h4 className="text-lg font-semibold text-gray-900">{project.project_name}</h4>
-                  <p className="text-sm text-gray-500">{project.developer_name || "-"}</p>
+                  <h4 className="break-words text-base font-semibold text-gray-900">{project.project_name}</h4>
+                  <p className="break-words text-sm text-gray-500">{project.developer_name || "-"}</p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 text-sm">
@@ -1242,18 +995,20 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                       <EyeOff className="h-3.5 w-3.5" />
                       {project.is_hidden ? "Unhide" : "Hide"}
                     </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setError(null);
-                        setPendingDeleteProject(project);
-                      }}
-                      className="inline-flex items-center gap-1 rounded-md border border-red-200 px-3 py-1.5 text-xs text-red-600 hover:text-red-700"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      Delete
-                    </button>
+                    {canDeleteProjects && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setError(null);
+                          setPendingDeleteProject(project);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md border border-red-200 px-3 py-1.5 text-xs text-red-600 hover:text-red-700"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Delete
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1652,96 +1407,46 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
               <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
                 <h3 className="text-lg font-semibold text-gray-800 border-b border-gray-100 pb-3 mb-4">Commission Structure</h3>
                 <div className="space-y-4">
-                  {formData.commissionStructures.map((structure, index) => (
+                  {(formData.commissionStructures[0] ? [formData.commissionStructures[0]] : [createEmptyCommissionStructure(1)]).map((structure) => (
                     <div
                       key={structure.id}
                       className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50/80 to-blue-50/40 shadow-sm transition hover:border-slate-300 hover:shadow-md"
                     >
+                      {(() => {
+                        const holdingShare = getHoldingShareBreakdown(structure);
+
+                        return (
+                      <>
                       <div className="border-b border-slate-200 bg-white/70 px-5 py-4 backdrop-blur">
                         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                           <div className="space-y-2">
                             <div className="flex flex-wrap items-center gap-2">
                               <h4 className="text-xl font-semibold tracking-tight text-slate-900">
-                                {structure.label || `Tier ${index + 1}`}
+                                Default Commission
                               </h4>
-                              {formData.defaultCommissionStructureId === structure.id && (
-                                <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
-                                  Current Tier
-                                </span>
-                              )}
                             </div>
-                            <p className="text-sm text-slate-500">Set the commission percentages for this tier.</p>
+                            <p className="text-sm text-slate-500">Set total commission, direct release, and holding amount.</p>
                             <div className="flex flex-wrap gap-2 pt-1">
-                              <span className="inline-flex items-center rounded-full bg-slate-900 px-3 py-1 text-xs font-medium text-white">
-                                {getTierUnitsSummary(structure.minUnits, structure.maxUnits)}
-                              </span>
                               <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
                                 Total {structure.totalCommission || "0"}%
                               </span>
+                              <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
+                                Direct {structure.directCommission || "0"}%
+                              </span>
+                              <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
+                                Holding {structure.holdingCommission || "0"}%
+                              </span>
                             </div>
                           </div>
-                          <div className="flex items-start md:justify-end">
-                            {formData.commissionStructures.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => removeCommissionStructure(structure.id)}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3.5 py-2 text-sm font-medium text-red-600 shadow-sm transition hover:border-red-300 hover:bg-red-50 hover:text-red-700"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                                Remove Tier
-                              </button>
-                            )}
-                          </div>
+                          <div />
                         </div>
                       </div>
 
                       <div className="space-y-5 p-5">
-                        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
-                          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                            <div className="mb-4 flex items-center justify-between gap-3">
-                              <div>
-                                <h5 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-500">Tier Setup</h5>
-                                <p className="mt-1 text-xs text-slate-400">Label this range and define which units belong here.</p>
-                              </div>
-                            </div>
-                            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                              <div className="md:col-span-2">
-                                <label className="mb-1 block text-sm font-medium text-slate-700">Tier Label</label>
-                                <input
-                                  type="text"
-                                  value={structure.label}
-                                  onChange={(event) => handleCommissionStructureChange(structure.id, "label", event.target.value)}
-                                  placeholder={`Tier ${index + 1}`}
-                                  className="w-full rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-sm text-slate-900 outline-none transition focus:border-primary focus:bg-white focus:ring-1 focus:ring-primary"
-                                />
-                              </div>
-                              <div>
-                                <label className="mb-1 block text-sm font-medium text-slate-700">Units From</label>
-                                <input
-                                  type="number"
-                                  value={structure.minUnits}
-                                  onChange={(event) => handleCommissionStructureChange(structure.id, "minUnits", event.target.value)}
-                                  placeholder="e.g. 1"
-                                  className="w-full rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-sm text-slate-900 outline-none transition focus:border-primary focus:bg-white focus:ring-1 focus:ring-primary"
-                                />
-                              </div>
-                              <div>
-                                <label className="mb-1 block text-sm font-medium text-slate-700">Units To</label>
-                                <input
-                                  type="number"
-                                  value={structure.maxUnits}
-                                  onChange={(event) => handleCommissionStructureChange(structure.id, "maxUnits", event.target.value)}
-                                  placeholder="e.g. 10"
-                                  className="w-full rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-sm text-slate-900 outline-none transition focus:border-primary focus:bg-white focus:ring-1 focus:ring-primary"
-                                />
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-sky-50 p-4 shadow-sm">
+                        <div className="rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-sky-50 p-4 shadow-sm">
                             <div className="mb-4">
                               <h5 className="text-sm font-semibold uppercase tracking-[0.16em] text-blue-700">Auto Split</h5>
-                              <p className="mt-1 text-xs text-slate-500">Set the total commission and the tier will pre-fill the split below.</p>
+                              <p className="mt-1 text-xs text-slate-500">Set the total commission and it will pre-fill the split below.</p>
                             </div>
                             <label className="mb-1 block text-sm font-medium text-slate-700">Total Commission (%)</label>
                             <input
@@ -1771,15 +1476,45 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                               </div>
                             </div>
                             <p className="mt-3 text-xs leading-relaxed text-slate-500">
-                              You can fine-tune the split after auto-fill if this tier needs a custom allocation.
+                              You can fine-tune the split after auto-fill if this project needs a custom allocation.
                             </p>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                          <div className="mb-4">
+                            <h5 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-500">Release Control</h5>
+                            <p className="mt-1 text-xs text-slate-400">Direct commission is released immediately. Holding commission is released manually.</p>
+                          </div>
+                          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                            <div>
+                              <label className="mb-1 block text-sm font-medium text-slate-700">Direct Commission (%)</label>
+                              <input
+                                type="number"
+                                value={structure.directCommission}
+                                onChange={(event) => handleCommissionStructureChange(structure.id, "directCommission", event.target.value)}
+                                placeholder="e.g. 1.5"
+                                step="0.001"
+                                className="w-full rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-sm text-slate-900 outline-none transition focus:border-primary focus:bg-white focus:ring-1 focus:ring-primary"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-sm font-medium text-slate-700">Holding Commission (%)</label>
+                              <input
+                                type="number"
+                                value={structure.holdingCommission}
+                                onChange={(event) => handleCommissionStructureChange(structure.id, "holdingCommission", event.target.value)}
+                                placeholder="e.g. 0.5"
+                                step="0.001"
+                                className="w-full rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-sm text-slate-900 outline-none transition focus:border-primary focus:bg-white focus:ring-1 focus:ring-primary"
+                              />
+                            </div>
                           </div>
                         </div>
 
                         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                           <div className="mb-4">
                             <h5 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-500">Commission Breakdown</h5>
-                            <p className="mt-1 text-xs text-slate-400">Adjust each portion manually if this tier needs a different split.</p>
+                            <p className="mt-1 text-xs text-slate-400">Adjust each portion manually if needed.</p>
                           </div>
                           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                             <div>
@@ -1827,50 +1562,38 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                               />
                             </div>
                           </div>
+
+                          <div className="mt-5 rounded-xl border border-dashed border-amber-200 bg-amber-50/60 p-4">
+                            <h6 className="text-xs font-semibold uppercase tracking-[0.12em] text-amber-700">Holding Commission Share Breakdown</h6>
+                            <p className="mt-1 text-xs text-amber-700/80">
+                              Calculated from Holding Commission (%) using the current commission breakdown weights.
+                            </p>
+                            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                              <div className="rounded-lg bg-white/80 px-3 py-2 text-xs text-slate-600 shadow-sm">
+                                <span className="block text-[11px] uppercase tracking-wide text-slate-400">Company Share</span>
+                                <span className="font-semibold text-slate-800">{formatCommissionPercentage(holdingShare.companyShare)}%</span>
+                              </div>
+                              <div className="rounded-lg bg-white/80 px-3 py-2 text-xs text-slate-600 shadow-sm">
+                                <span className="block text-[11px] uppercase tracking-wide text-slate-400">Agent Share</span>
+                                <span className="font-semibold text-slate-800">{formatCommissionPercentage(holdingShare.agentShare)}%</span>
+                              </div>
+                              <div className="rounded-lg bg-white/80 px-3 py-2 text-xs text-slate-600 shadow-sm">
+                                <span className="block text-[11px] uppercase tracking-wide text-slate-400">Pre Leader Share</span>
+                                <span className="font-semibold text-slate-800">{formatCommissionPercentage(holdingShare.preLeaderShare)}%</span>
+                              </div>
+                              <div className="rounded-lg bg-white/80 px-3 py-2 text-xs text-slate-600 shadow-sm">
+                                <span className="block text-[11px] uppercase tracking-wide text-slate-400">Leader Share</span>
+                                <span className="font-semibold text-slate-800">{formatCommissionPercentage(holdingShare.leaderShare)}%</span>
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       </div>
+                      </>
+                        );
+                      })()}
                     </div>
                   ))}
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Current Tier</label>
-                    <select
-                      name="defaultCommissionStructureId"
-                      value={formData.defaultCommissionStructureId}
-                      onChange={handleChange}
-                      className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none bg-white"
-                    >
-                      {formData.commissionStructures.map((structure, index) => (
-                        <option key={structure.id} value={structure.id}>
-                          {getCommissionStructureLabel(
-                            {
-                              id: structure.id,
-                              label: structure.label || `Tier ${index + 1}`,
-                              min_units: structure.minUnits ? Number(structure.minUnits) : null,
-                              max_units: structure.maxUnits ? Number(structure.maxUnits) : null,
-                              company_commission: structure.companyCommission ? Number(structure.companyCommission) : null,
-                              agent_commission: structure.agentCommission ? Number(structure.agentCommission) : null,
-                              pre_leader_override: structure.preLeaderOverride ? Number(structure.preLeaderOverride) : null,
-                              leader_override: structure.leaderOverride ? Number(structure.leaderOverride) : null,
-                            },
-                            index,
-                          )}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="text-xs text-gray-500 mt-1">
-                      New cases will automatically use this tier. Users will no longer choose it in the sales case form.
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={addCommissionStructure}
-                    className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                  >
-                    <Plus className="h-4 w-4" />
-                    New Tier
-                  </button>
                 </div>
               </div>
 
@@ -2052,7 +1775,7 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                           <p className="font-medium text-gray-800">{getCommissionStructureLabel(structure, index)}</p>
                           {selectedProject.default_commission_structure_id === structure.id && (
                             <span className="inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
-                              Current Tier
+                              Default
                             </span>
                           )}
                         </div>
@@ -2075,6 +1798,18 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
                             <p className="text-gray-400">Leader</p>
                             <p className="mt-1 font-medium text-gray-800">{formatCommissionPercentage(structure.leader_override)}%</p>
                           </div>
+                          {canManageProjects && (
+                            <div>
+                              <p className="text-gray-400">Direct</p>
+                              <p className="mt-1 font-medium text-gray-800">{formatCommissionPercentage(structure.direct_commission)}%</p>
+                            </div>
+                          )}
+                          {canManageProjects && (
+                            <div>
+                              <p className="text-gray-400">Holding</p>
+                              <p className="mt-1 font-medium text-gray-800">{formatCommissionPercentage(structure.holding_commission)}%</p>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -2141,34 +1876,45 @@ export function ProjectsForm({ role, userId }: ProjectsFormProps) {
         </div>
       )}
 
-      {pendingDeleteProject && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-md rounded-2xl border border-gray-100 bg-white shadow-2xl">
-            <div className="border-b border-gray-100 px-6 py-5">
-              <h3 className="text-lg font-semibold text-gray-900">Delete project?</h3>
-              <p className="mt-2 text-sm leading-6 text-gray-500">
-                This will permanently remove
-                <span className="font-medium text-gray-800"> {pendingDeleteProject.project_name}</span>
-                . The cover image and project attachments will be removed together with the project.
-              </p>
-              {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-            </div>
-            <div className="flex items-center justify-end gap-3 px-6 py-4">
+      {pendingDeleteProject && canDeleteProjects && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="w-full max-w-lg rounded-lg bg-white p-6 shadow-xl">
+            <h2 className="text-xl font-bold">Confirm Deletion</h2>
+            <p className="mt-2">
+              This action cannot be undone. This will permanently delete the project and all associated data.
+            </p>
+            <p className="mt-4">
+              Please type{" "}
+              <strong className="font-mono text-red-600">CONFIRM/{pendingDeleteProject.project_name}</strong> to
+              confirm.
+            </p>
+            <input
+              type="text"
+              value={deleteConfirmationText}
+              onChange={(e) => setDeleteConfirmationText(e.target.value)}
+              className="mt-2 w-full rounded-md border border-gray-300 p-2"
+              placeholder={`CONFIRM/${pendingDeleteProject.project_name}`}
+            />
+            <div className="mt-6 flex justify-end space-x-2">
               <button
                 type="button"
-                onClick={() => setPendingDeleteProject(null)}
+                className="rounded-md border border-gray-300 bg-white px-4 py-2 text-gray-700 hover:bg-gray-50"
+                onClick={() => {
+                  setPendingDeleteProject(null);
+                  setDeleteConfirmationText("");
+                }}
                 disabled={isDeletingProject}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 disabled:opacity-60"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={() => void handleDelete(pendingDeleteProject)}
-                disabled={isDeletingProject}
-                className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
+                className="rounded-md bg-red-600 px-4 py-2 text-white hover:bg-red-700 disabled:opacity-50"
+                onClick={handleDeleteProject}
+                disabled={
+                  deleteConfirmationText !== `CONFIRM/${pendingDeleteProject.project_name}` || isDeletingProject
+                }
               >
-                <Trash2 className="h-4 w-4" />
                 {isDeletingProject ? "Deleting..." : "Delete Project"}
               </button>
             </div>

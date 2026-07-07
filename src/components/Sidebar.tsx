@@ -16,7 +16,10 @@ interface SidebarProps {
   canViewManageCases: boolean;
   canViewCommReview: boolean;
   canViewPayout: boolean;
+  canViewPaymentVoucher: boolean;
+  canViewMemberVoucher: boolean;
   canViewFinance: boolean;
+  canViewUsers: boolean;
   isOpen: boolean;
   onClose: () => void;
 }
@@ -51,7 +54,6 @@ const getStoragePathFromUrl = (url: string | null) => {
 export function Sidebar({
   activeView,
   setActiveView,
-  isSuperAdmin,
   currentUserId,
   canEditBranding,
   canManageEvents,
@@ -62,7 +64,10 @@ export function Sidebar({
   canViewManageCases,
   canViewCommReview,
   canViewPayout,
+  canViewPaymentVoucher,
+  canViewMemberVoucher,
   canViewFinance,
+  canViewUsers,
   isOpen,
   onClose,
 }: SidebarProps) {
@@ -79,14 +84,16 @@ export function Sidebar({
   const navItems = [
     { name: "Dashboard", icon: Home },
     { name: "Events", icon: Calendar, isVisible: canManageEvents },
-    { name: "Users", icon: Users, isVisible: isSuperAdmin },
+    { name: "Users", icon: Users, isVisible: canViewUsers },
     { name: "Sales Cases", icon: FileText, isVisible: canViewSalesCases },
     { name: "Team", icon: Users, isVisible: canViewTeam },
     { name: "Ranking", icon: Trophy, isVisible: canViewRanking },
     { name: "Rank Progress", icon: Trophy, isVisible: canViewRankProgress },
     { name: "Manage Cases", icon: FileText, isVisible: canViewManageCases },
     { name: "Cases Approval", icon: FileText, isVisible: canViewCommReview },
-    { name: "Payout", icon: FileText, isVisible: canViewPayout },
+    { name: "Payout", label: "Payout Approval", icon: FileText, isVisible: canViewPayout },
+    { name: "Payment Voucher", icon: FileText, isVisible: canViewPaymentVoucher },
+    { name: "My Payment Voucher", icon: FileText, isVisible: canViewMemberVoucher },
     { name: "Finance", icon: DollarSign, isVisible: canViewFinance },
     { name: "Projects", icon: Briefcase },
   ];
@@ -245,7 +252,7 @@ export function Sidebar({
             }`}
           >
             <item.icon className="h-5 w-5" />
-            {item.name}
+            {item.label ?? item.name}
           </button>
         ))}
       </nav>

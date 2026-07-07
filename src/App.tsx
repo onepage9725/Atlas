@@ -10,12 +10,17 @@ import { ManageCases } from "./components/ManageCases";
 import { CommReviewPage } from "./components/CommReviewPage";
 import { FinancePage } from "./components/FinancePage";
 import { PayoutPage } from "./components/PayoutPage";
+import { PaymentVoucherPage } from "./components/PaymentVoucherPage";
+import { MyPaymentVoucherPage } from "./components/MyPaymentVoucherPage";
 import { ProfilePage } from "./components/ProfilePage";
 import { RankingPage } from "./components/RankingPage";
 import { RankProgressPage } from "./components/RankProgressPage";
 import { TeamPage } from "./components/TeamPage";
 import { AuthPage } from "./components/AuthPage";
 import { supabase } from "./lib/supabaseClient";
+
+const normalizeAccessValue = (value: string | null) =>
+  value?.trim().toLowerCase().replace(/\s+/g, "_") ?? null;
 
 function App() {
   const [activeView, setActiveView] = useState("Dashboard");
@@ -140,23 +145,35 @@ function App() {
     setProfileAvatarZoom(avatarZoom);
   };
 
-  const isSuperAdmin = profileRole === "super_admin";
-  const isAdmin = profileRole === "admin";
+  const normalizedProfileRole = normalizeAccessValue(profileRole);
+  const normalizedProfileRank = normalizeAccessValue(profileRank);
+  const isSuperAdmin = normalizedProfileRole === "super_admin";
+  const isAdmin = normalizedProfileRole === "admin";
+  const canViewUsers = isSuperAdmin || isAdmin;
   const isMemberAccount =
-    profileRole === "agent" ||
-    profileRole === "leader" ||
-    profileRank === "agent" ||
-    profileRank === "pre_leader" ||
-    profileRank === "leader";
-  const canManageEvents = profileRole === "super_admin" || profileRole === "admin";
+    normalizedProfileRole === "agent" ||
+    normalizedProfileRole === "leader" ||
+    normalizedProfileRank === "agent" ||
+    normalizedProfileRank === "pre_leader" ||
+    normalizedProfileRank === "leader";
+  const canManageEvents = normalizedProfileRole === "super_admin" || normalizedProfileRole === "admin";
   const canViewManageCases = isSuperAdmin || isAdmin;
   const canViewCommReview = isSuperAdmin;
   const canViewPayout = isSuperAdmin;
+  const canViewPaymentVoucher = isSuperAdmin || isAdmin;
   const canViewFinance = isSuperAdmin;
   const canViewSalesCases = !isSuperAdmin && !isAdmin && isMemberAccount;
   const canViewTeam = isMemberAccount;
   const canViewRanking = isMemberAccount || isAdmin || isSuperAdmin;
   const canViewRankProgress = isSuperAdmin || isAdmin;
+  const hasMemberVoucherAccessByRoleOrRank =
+    normalizedProfileRank === "agent" ||
+    normalizedProfileRank === "pre_leader" ||
+    normalizedProfileRank === "leader" ||
+    normalizedProfileRole === "agent" ||
+    normalizedProfileRole === "pre_leader" ||
+    normalizedProfileRole === "leader";
+  const canViewMemberVoucher = !isSuperAdmin && !isAdmin && hasMemberVoucherAccessByRoleOrRank;
 
   if (isLoading || (sessionUserId !== null && isProfileLoading)) {
     return (
@@ -177,6 +194,7 @@ function App() {
         setActiveView={handleSetActiveView}
         isSuperAdmin={isSuperAdmin}
         currentUserId={sessionUserId}
+        canViewUsers={canViewUsers}
         canEditBranding={isSuperAdmin || isAdmin}
         canManageEvents={canManageEvents}
         canViewSalesCases={canViewSalesCases}
@@ -186,6 +204,8 @@ function App() {
         canViewManageCases={canViewManageCases}
         canViewCommReview={canViewCommReview}
         canViewPayout={canViewPayout}
+        canViewPaymentVoucher={canViewPaymentVoucher}
+        canViewMemberVoucher={canViewMemberVoucher}
         canViewFinance={canViewFinance}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
@@ -205,7 +225,9 @@ function App() {
         onMenuClick={() => setIsSidebarOpen((current) => !current)}
       />
       <main>
-        {activeView === "Dashboard" && <Dashboard role={profileRole} rank={profileRank} userId={sessionUserId} />}
+        {activeView === "Dashboard" && (
+          <Dashboard role={normalizedProfileRole} rank={normalizedProfileRank} userId={sessionUserId} />
+        )}
         {activeView === "Events" &&
           (canManageEvents ? (
             sessionUserId ? (
@@ -224,7 +246,8 @@ function App() {
               </div>
             </div>
           ))}
-        {activeView === "Projects" && <ProjectsForm role={profileRole} userId={sessionUserId} />}
+        {canViewUsers && activeView === "Users" && <UsersForm />}
+        {activeView === "Projects" && <ProjectsForm role={normalizedProfileRole} userId={sessionUserId} />}
         {activeView === "Sales Cases" &&
           (canViewSalesCases && sessionUserId ? (
             <SalesCasesForm userId={sessionUserId} />
@@ -304,7 +327,47 @@ function App() {
         {activeView === "Payout" &&
           (canViewPayout ? (
             sessionUserId ? (
-              <PayoutPage userId={sessionUserId} />
+              <PayoutPage userId={sessionUserId} onNavigateToPaymentVoucher={() => handleSetActiveView("Payment Voucher")} />
+            ) : (
+              <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
+                <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
+                  Missing user session.
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
+              <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
+                You do not have permission to access this section.
+              </div>
+            </div>
+          ))}
+        {activeView === "Payment Voucher" &&
+          (canViewPaymentVoucher ? (
+            sessionUserId ? (
+              <PaymentVoucherPage userId={sessionUserId} canGenerateVoucher={isSuperAdmin} />
+            ) : (
+              <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
+                <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
+                  Missing user session.
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
+              <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
+                You do not have permission to access this section.
+              </div>
+            </div>
+          ))}
+        {activeView === "My Payment Voucher" &&
+          (canViewMemberVoucher ? (
+            sessionUserId ? (
+              <MyPaymentVoucherPage
+                userId={sessionUserId}
+                userName={profileName}
+                userEmail={sessionEmail}
+              />
             ) : (
               <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
                 <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
@@ -340,19 +403,10 @@ function App() {
         {activeView === "Profile" && sessionUserId && (
           <ProfilePage
             userId={sessionUserId}
+            role={profileRole}
             onProfileUpdated={handleProfileUpdated}
           />
         )}
-        {activeView === "Users" &&
-          (isSuperAdmin ? (
-            <UsersForm />
-          ) : (
-            <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
-              <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
-                You do not have permission to access this section.
-              </div>
-            </div>
-          ))}
       </main>
     </div>
   );

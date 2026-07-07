@@ -7,6 +7,10 @@ import {
   getCompletedCommissionAmountForProfiles,
 } from "../lib/salesCaseMetrics";
 import {
+  getCaseCommissionStructure,
+  getHoldingCommissionPercentage,
+} from "../lib/commissionStructures";
+import {
   getCaseStatusClasses,
   hasCaseWorkflowColumns,
   isCaseLockedForEditing,
@@ -76,6 +80,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
   const [selectedMonthValue, setSelectedMonthValue] = useState<string>(() => `${today.getMonth() + 1}`.padStart(2, "0"));
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [selectedAgentId, setSelectedAgentId] = useState("all");
+  const [commissionTypeFilter, setCommissionTypeFilter] = useState<"all" | "direct" | "holding">("all");
 
   const caseWorkflowEnabled = useMemo(
     () => cases.some((record) => hasCaseWorkflowColumns(record)),
@@ -154,6 +159,12 @@ export function ManageCases({ userId }: ManageCasesProps) {
     record.created_by === selectedAgentId ||
     (record.involved_user_ids ?? []).includes(selectedAgentId);
 
+  const hasHoldingCommission = (record: SalesCaseRecord) => {
+    const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
+    const commissionStructure = getCaseCommissionStructure(record, project);
+    return getHoldingCommissionPercentage(commissionStructure) > 0;
+  };
+
   const summaryCases = useMemo(
     () => cases.filter((record) => matchesSelectedMonth(record) && matchesSelectedProject(record) && matchesSelectedAgent(record)),
     [cases, selectedAgentId, selectedMonthValue, selectedProjectId]
@@ -182,6 +193,10 @@ export function ManageCases({ userId }: ManageCasesProps) {
         return false;
       }
 
+      if (commissionTypeFilter === "holding" && !hasHoldingCommission(record)) {
+        return false;
+      }
+
       if (!normalizedSearch) {
         return true;
       }
@@ -189,7 +204,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
       return [creator, relatedMembers, projectName, record.unit_number || ""]
         .some((value) => value.toLowerCase().includes(normalizedSearch));
     });
-  }, [caseSearchTerm, payoutMap, profileMap, projectMap, statusFilter, summaryCases]);
+  }, [caseSearchTerm, commissionTypeFilter, payoutMap, profileMap, projectMap, statusFilter, summaryCases]);
 
   const availableProjectOptions = useMemo(
     () =>
@@ -231,12 +246,27 @@ export function ManageCases({ userId }: ManageCasesProps) {
   );
 
   const totalMonthlyConverted = useMemo(
-    () =>
-      summaryCases.reduce(
+    () => {
+      const summaryCaseIds = new Set(summaryCases.map((record) => record.id));
+
+      const convertedDirect = summaryCases.reduce(
         (sum, record) => sum + getCompletedCommissionAmountForProfiles(payoutMap.get(record.id) ?? [], memberProfileIds),
         0
-      ),
-    [memberProfileIds, payoutMap, summaryCases]
+      );
+
+      const convertedTopUp = payouts
+        .filter(
+          (payout) =>
+            payout.payout_type === "tier_upgrade_top_up" &&
+            payout.payout_status === "Paid" &&
+            summaryCaseIds.has(payout.sales_case_id) &&
+            memberProfileIds.has(payout.profile_id)
+        )
+        .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
+
+      return convertedDirect + convertedTopUp;
+    },
+    [memberProfileIds, payoutMap, payouts, summaryCases]
   );
 
   const totalMonthlyCaseCount = useMemo(() => summaryCases.length, [summaryCases]);
@@ -246,7 +276,6 @@ export function ManageCases({ userId }: ManageCasesProps) {
       payouts.reduce((sum, payout) => {
         if (
           payout.payout_status !== "Paid" ||
-          payout.payout_type === "tier_upgrade_top_up" ||
           !summaryCases.some((record) => record.id === payout.sales_case_id)
         ) {
           return sum;
@@ -264,6 +293,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
         memberLabel: string;
         receiptUrl: string;
         paidAt: string | null;
+        grossAmount: number;
       }>;
     }
 
@@ -276,6 +306,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
         memberLabel: profileMap.get(payout.profile_id)?.name || profileMap.get(payout.profile_id)?.email || "Member",
         receiptUrl: payout.payment_receipt_url as string,
         paidAt: payout.paid_at,
+        grossAmount: Number(payout.total_amount ?? 0),
       }));
   }, [editingCase, payoutMap, profileMap]);
 
@@ -593,7 +624,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
       </div>
 
       <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
-        <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4 xl:grid-cols-[minmax(0,1fr)_220px_220px_220px_220px]">
+        <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4 xl:grid-cols-[minmax(0,1fr)_220px_220px_220px_220px_220px]">
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-700">Search Cases</label>
             <input
@@ -677,6 +708,18 @@ export function ManageCases({ userId }: ManageCasesProps) {
               ))}
             </select>
           </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-700">Filter by Comm Type</label>
+            <select
+              value={commissionTypeFilter}
+              onChange={(event) => setCommissionTypeFilter(event.target.value as "all" | "direct" | "holding")}
+              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary bg-white"
+            >
+              <option value="all">All comm types</option>
+              <option value="direct">Direct comm cases</option>
+              <option value="holding">Holding comm cases</option>
+            </select>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm whitespace-nowrap">
@@ -685,7 +728,6 @@ export function ManageCases({ userId }: ManageCasesProps) {
                 <th className="px-6 py-2">Created Date</th>
                 <th className="px-6 py-2">Booking Date</th>
                 <th className="px-6 py-2">Project</th>
-                <th className="px-6 py-2">Unit</th>
                 <th className="px-6 py-2">SPA Price (RM)</th>
                 <th className="px-6 py-2">Nett Price (RM)</th>
                 <th className="px-6 py-2">Created By</th>
@@ -746,8 +788,10 @@ export function ManageCases({ userId }: ManageCasesProps) {
                     <td className="px-6 py-3 text-gray-600">
                       {bookingDate ? bookingDate.toLocaleDateString() : "-"}
                     </td>
-                    <td className="px-6 py-3 text-gray-600">{projectName}</td>
-                    <td className="px-6 py-3 text-gray-600">{record.unit_number || "-"}</td>
+                    <td className="px-6 py-3 text-gray-600">
+                      <div className="font-medium text-gray-800">{projectName}</div>
+                      <div className="text-xs text-gray-500">{record.unit_number ? `Unit ${record.unit_number}` : "Unit -"}</div>
+                    </td>
                     <td className="px-6 py-3 text-gray-600">{formatAmount(record.spa_price)}</td>
                     <td className="px-6 py-3 text-gray-600">{formatAmount(record.nett_price)}</td>
                     <td className="px-6 py-3 text-gray-600">{creator}</td>

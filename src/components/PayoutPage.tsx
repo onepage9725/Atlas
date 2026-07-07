@@ -1,13 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Trash2, Upload } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, Upload } from "lucide-react";
 import { fetchNotificationProfiles, getNotificationProfileLabel, notifyCaseAudience, notifyPayoutPaid } from "../lib/notifications";
 import { supabase } from "../lib/supabaseClient";
 import {
   getCaseCommissionStructure,
+  getDirectCommissionPercentage,
+  getHoldingCommissionPercentage,
   getProjectCommissionStructures,
   getShortCommissionStructureLabel,
 } from "../lib/commissionStructures";
-import { buildTierUpgradeTopUpStructure } from "../lib/salesCasePayouts";
+import {
+  buildCommissionStructureByTotalPercentage,
+  buildTierUpgradeTopUpStructure,
+} from "../lib/salesCasePayouts";
 import {
   hasCaseWorkflowColumns,
   MANAGE_CASE_STATUS_OPTIONS,
@@ -106,6 +111,19 @@ const formatPercentage = (value: number) => {
   })}%`;
 };
 
+const formatSignedLoDate = (value: string | null | undefined) => {
+  if (!value) {
+    return "-";
+  }
+
+  const parsedDate = new Date(value);
+  if (Number.isNaN(parsedDate.getTime())) {
+    return value;
+  }
+
+  return parsedDate.toLocaleDateString("en-MY");
+};
+
 const sanitizeFileName = (fileName: string) => {
   const extensionIndex = fileName.lastIndexOf(".");
   const hasExtension = extensionIndex > 0;
@@ -159,6 +177,16 @@ const getMemberPayoutLabel = (payout: SalesCasePayoutRecord) => {
     getShortCommissionStructureLabel(payout.target_commission_structure_label) ||
     payout.target_commission_structure_id ||
     "New Tier";
+
+  if (
+    (payout.source_commission_structure_id === "holding_commission" ||
+      sourceLabel.toLowerCase() === "holding commission") &&
+    (payout.target_commission_structure_id === "released" ||
+      targetLabel.toLowerCase() === "released")
+  ) {
+    return "Holding Comm";
+  }
+
   return `${sourceLabel} -> ${targetLabel}`;
 };
 
@@ -186,6 +214,14 @@ const getCompanyPayoutLabel = (
 
   const sourceLabel = getShortCommissionStructureLabel(sourceCommissionStructureLabel) || "Previous Tier";
   const targetLabel = getShortCommissionStructureLabel(targetCommissionStructureLabel) || "New Tier";
+
+  if (
+    sourceLabel.toLowerCase() === "holding commission" &&
+    targetLabel.toLowerCase() === "released"
+  ) {
+    return "Holding Comm";
+  }
+
   return `${sourceLabel} -> ${targetLabel}`;
 };
 
@@ -202,7 +238,13 @@ const getCompanyRowKey = (
     targetCommissionStructureId,
   );
 
-export function PayoutPage({ userId }: { userId: string }) {
+export function PayoutPage({
+  userId,
+  onNavigateToPaymentVoucher,
+}: {
+  userId: string;
+  onNavigateToPaymentVoucher?: () => void;
+}) {
   const [payouts, setPayouts] = useState<SalesCasePayoutRecord[]>([]);
   const [companyReceipts, setCompanyReceipts] = useState<FinanceEntryRecord[]>([]);
   const [cases, setCases] = useState<SalesCaseRecord[]>([]);
@@ -223,6 +265,12 @@ export function PayoutPage({ userId }: { userId: string }) {
   const [companyReceiveAmount, setCompanyReceiveAmount] = useState("");
   const [companyReceiveDate, setCompanyReceiveDate] = useState(() => getLocalDateInputValue(new Date()));
   const [companyReceiveReference, setCompanyReceiveReference] = useState("");
+  const [expandedProjectUnitKeys, setExpandedProjectUnitKeys] = useState<string[]>([]);
+  const [selectedProjectFilter, setSelectedProjectFilter] = useState("all");
+  const [unitSearchFilter, setUnitSearchFilter] = useState("");
+  const [signedLoDateSort, setSignedLoDateSort] = useState<"desc" | "asc">("desc");
+  const [signedLoFromDate, setSignedLoFromDate] = useState("");
+  const [signedLoToDate, setSignedLoToDate] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const companyReceiptInputRef = useRef<HTMLInputElement | null>(null);
   const caseWorkflowEnabled = useMemo(
@@ -294,7 +342,7 @@ export function PayoutPage({ userId }: { userId: string }) {
 
   const payoutDisplayRows = useMemo<PayoutDisplayRow[]>(() => {
     const memberRows: PayoutDisplayRow[] = payouts
-      .filter((payout) => payout.payout_status !== "Paid")
+      .filter((payout) => payout.payout_status === "Pending")
       .map((payout) => {
       const record = caseMap.get(payout.sales_case_id) ?? null;
       const project = record?.project_id ? projectMap.get(record.project_id) ?? null : null;
@@ -327,6 +375,14 @@ export function PayoutPage({ userId }: { userId: string }) {
       const record = caseMap.get(salesCaseId) ?? null;
       const project = record?.project_id ? projectMap.get(record.project_id) ?? null : null;
       const commissionStructure = getCaseCommissionStructure(record, project);
+      const directCommissionStructure = commissionStructure
+        ? buildCommissionStructureByTotalPercentage(
+            commissionStructure,
+            getDirectCommissionPercentage(commissionStructure),
+            `${commissionStructure.id}-direct`,
+            commissionStructure.label,
+          )
+        : null;
       const receiptKey = getCompanyRowKey(salesCaseId, "standard", null, null);
       const receiptSummary = companyReceiptSummary.summaryMap.get(receiptKey);
 
@@ -334,14 +390,15 @@ export function PayoutPage({ userId }: { userId: string }) {
         !record ||
         !project ||
         !commissionStructure ||
+        !directCommissionStructure ||
         record.nett_price === null ||
-        (commissionStructure.company_commission ?? 0) === 0 ||
+        (directCommissionStructure.company_commission ?? 0) === 0 ||
         companyReceiptSummary.hiddenKeys.has(receiptKey)
       ) {
         return [];
       }
 
-      const grossCompanyAmount = Number(((record.nett_price * (commissionStructure.company_commission ?? 0)) / 100).toFixed(2));
+      const grossCompanyAmount = Number(((record.nett_price * (directCommissionStructure.company_commission ?? 0)) / 100).toFixed(2));
       const totalReceived = Number((receiptSummary?.totalReceived ?? 0).toFixed(2));
       const remainingAmount = Number(Math.max(grossCompanyAmount - totalReceived, 0).toFixed(2));
 
@@ -358,7 +415,7 @@ export function PayoutPage({ userId }: { userId: string }) {
         memberLabel: "Company" as const,
         spaPrice: record.spa_price,
         nettPrice: record.nett_price,
-        commissionPercentage: commissionStructure.company_commission ?? 0,
+        commissionPercentage: directCommissionStructure.company_commission ?? 0,
         preLeaderOverridePercentage: 0,
         leaderOverridePercentage: 0,
         totalAmount: grossCompanyAmount,
@@ -392,10 +449,20 @@ export function PayoutPage({ userId }: { userId: string }) {
       const projectStructures = getProjectCommissionStructures(project);
       const sourceStructure = projectStructures.find((structure) => structure.id === payout.source_commission_structure_id);
       const targetStructure = projectStructures.find((structure) => structure.id === payout.target_commission_structure_id);
+      const caseCommissionStructure = getCaseCommissionStructure(record, project);
       const topUpStructure =
         sourceStructure && targetStructure
           ? buildTierUpgradeTopUpStructure(sourceStructure, targetStructure)
-          : null;
+          : payout.source_commission_structure_id === "holding_commission" &&
+              payout.target_commission_structure_id === "released" &&
+              caseCommissionStructure
+            ? buildCommissionStructureByTotalPercentage(
+                caseCommissionStructure,
+                getHoldingCommissionPercentage(caseCommissionStructure),
+                `${caseCommissionStructure.id}-holding`,
+                "Holding Commission",
+              )
+            : null;
       const receiptKey = getCompanyRowKey(
         payout.sales_case_id,
         payout.payout_type,
@@ -489,6 +556,144 @@ export function PayoutPage({ userId }: { userId: string }) {
       ),
     [payoutDisplayRows]
   );
+
+  const groupedPayoutRows = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        key: string;
+        projectName: string;
+        unitLabel: string;
+        signedLoDate: string | null;
+        rows: PayoutDisplayRow[];
+      }
+    >();
+
+    payoutDisplayRows.forEach((row) => {
+      const projectName = row.project?.project_name || "-";
+      const unitLabel = row.record?.unit_number || "-";
+      const key = `${projectName}::${unitLabel}`;
+
+      const existing = grouped.get(key) ?? {
+        key,
+        projectName,
+        unitLabel,
+        signedLoDate: row.record?.signed_lo_date ?? null,
+        rows: [],
+      };
+
+      if (!existing.signedLoDate && row.record?.signed_lo_date) {
+        existing.signedLoDate = row.record.signed_lo_date;
+      }
+
+      existing.rows.push(row);
+      grouped.set(key, existing);
+    });
+
+    return Array.from(grouped.values());
+  }, [payoutDisplayRows]);
+
+  const availableProjectFilters = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          groupedPayoutRows
+            .map((group) => group.projectName)
+            .filter((name) => name && name !== "-")
+        )
+      ).sort((left, right) => left.localeCompare(right)),
+    [groupedPayoutRows]
+  );
+
+  const filteredGroupedPayoutRows = useMemo(() => {
+    const normalizedUnitQuery = unitSearchFilter.trim().toLowerCase();
+    const fromTime = signedLoFromDate ? new Date(`${signedLoFromDate}T00:00:00`).getTime() : null;
+    const toTime = signedLoToDate ? new Date(`${signedLoToDate}T23:59:59`).getTime() : null;
+
+    return groupedPayoutRows
+      .filter((group) => {
+        if (selectedProjectFilter !== "all" && group.projectName !== selectedProjectFilter) {
+          return false;
+        }
+
+        if (!normalizedUnitQuery) {
+          const groupSignedLoTime = group.signedLoDate
+            ? new Date(`${group.signedLoDate}T12:00:00`).getTime()
+            : null;
+
+          if (fromTime !== null) {
+            if (groupSignedLoTime === null || groupSignedLoTime < fromTime) {
+              return false;
+            }
+          }
+
+          if (toTime !== null) {
+            if (groupSignedLoTime === null || groupSignedLoTime > toTime) {
+              return false;
+            }
+          }
+
+          return true;
+        }
+
+        const textMatched = (
+          group.unitLabel.toLowerCase().includes(normalizedUnitQuery) ||
+          group.projectName.toLowerCase().includes(normalizedUnitQuery)
+        );
+
+        if (!textMatched) {
+          return false;
+        }
+
+        const groupSignedLoTime = group.signedLoDate
+          ? new Date(`${group.signedLoDate}T12:00:00`).getTime()
+          : null;
+
+        if (fromTime !== null) {
+          if (groupSignedLoTime === null || groupSignedLoTime < fromTime) {
+            return false;
+          }
+        }
+
+        if (toTime !== null) {
+          if (groupSignedLoTime === null || groupSignedLoTime > toTime) {
+            return false;
+          }
+        }
+
+        return true;
+      })
+      .sort((left, right) => {
+        const leftSignedLo = left.signedLoDate ? new Date(left.signedLoDate).getTime() : 0;
+        const rightSignedLo = right.signedLoDate ? new Date(right.signedLoDate).getTime() : 0;
+
+        if (leftSignedLo !== rightSignedLo) {
+          return signedLoDateSort === "desc"
+            ? rightSignedLo - leftSignedLo
+            : leftSignedLo - rightSignedLo;
+        }
+
+        return left.projectName.localeCompare(right.projectName);
+      });
+  }, [groupedPayoutRows, selectedProjectFilter, unitSearchFilter, signedLoDateSort, signedLoFromDate, signedLoToDate]);
+
+  useEffect(() => {
+    if (filteredGroupedPayoutRows.length === 0) {
+      setExpandedProjectUnitKeys([]);
+      return;
+    }
+
+    setExpandedProjectUnitKeys((prev) => {
+      const existing = prev.filter((key) => filteredGroupedPayoutRows.some((group) => group.key === key));
+      return existing;
+    });
+  }, [filteredGroupedPayoutRows]);
+
+  const toggleProjectUnitGroup = (groupKey: string) => {
+    setExpandedProjectUnitKeys((prev) =>
+      prev.includes(groupKey) ? prev.filter((key) => key !== groupKey) : [...prev, groupKey]
+    );
+  };
 
   const pendingCompanyReceiveHistory = useMemo(() => {
     if (!pendingCompanyReceive) {
@@ -613,7 +818,7 @@ export function PayoutPage({ userId }: { userId: string }) {
     const { data: projectData, error: projectError } = await supabase
       .from("projects")
       .select(
-        "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, commission_structures, default_commission_structure_id"
+        "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, direct_commission, holding_commission, commission_structures, default_commission_structure_id"
       )
       .in("id", projectIds);
 
@@ -735,6 +940,102 @@ export function PayoutPage({ userId }: { userId: string }) {
     setPendingReject(null);
     setIsUpdatingId(null);
     setSuccess("Payout case rejected. All involved payout rows were removed and the case status is now Reject.");
+  };
+
+  const splitPendingRowsByComponent = async (
+    rows: SalesCasePayoutRecord[],
+    nextStatus: SalesCasePayoutRecord["payout_status"],
+  ) => {
+    const rowsToUpdate = rows.map((row) => row.id);
+
+    if (rowsToUpdate.length > 0) {
+      const { error: updateError } = await supabase
+        .from("sales_case_payouts")
+        .update({ payout_status: nextStatus })
+        .in("id", rowsToUpdate);
+
+      if (updateError) {
+        return updateError;
+      }
+    }
+
+    return null;
+  };
+
+  const handleApproveFirstComm = async (salesCaseId: string) => {
+    setError(null);
+    setSuccess(null);
+    setIsUpdatingId(salesCaseId);
+
+    const targetRows = payouts.filter(
+      (row) =>
+        row.sales_case_id === salesCaseId &&
+        row.payout_type === "standard" &&
+        row.payout_status === "Pending"
+    );
+
+    if (targetRows.length === 0) {
+      setError("No pending first commission rows found for this case.");
+      setIsUpdatingId(null);
+      return;
+    }
+
+    const splitError = await splitPendingRowsByComponent(targetRows, "Approve");
+
+    if (splitError) {
+      setError(splitError.message);
+      setIsUpdatingId(null);
+      return;
+    }
+
+    await fetchData();
+    setIsUpdatingId(null);
+    setSuccess("1st commission approved and moved to Payment Voucher.");
+  };
+
+  const handleApproveHoldingComm = async (salesCaseId: string) => {
+    setError(null);
+    setSuccess(null);
+    setIsUpdatingId(salesCaseId);
+
+    const targetRows = payouts.filter((row) => {
+      if (row.sales_case_id !== salesCaseId || row.payout_status !== "Pending") {
+        return false;
+      }
+
+      if (row.payout_type !== "tier_upgrade_top_up") {
+        return false;
+      }
+
+      const source = (row.source_commission_structure_id ?? "").toLowerCase();
+      const target = (row.target_commission_structure_id ?? "").toLowerCase();
+      const sourceLabel = (row.source_commission_structure_label ?? "").toLowerCase();
+      const targetLabel = (row.target_commission_structure_label ?? "").toLowerCase();
+
+      const sourceMatches = source === "holding_commission" || sourceLabel === "holding commission";
+      const targetMatches = target === "released" || targetLabel === "released";
+
+      return sourceMatches && targetMatches;
+    });
+
+    if (targetRows.length === 0) {
+      setError("No pending holding commission rows found for this case.");
+      setIsUpdatingId(null);
+      return;
+    }
+
+    const splitError = await splitPendingRowsByComponent(targetRows, "Approve");
+
+    if (splitError) {
+      setError(splitError.message);
+      setIsUpdatingId(null);
+      return;
+    }
+
+    await fetchData();
+    setIsUpdatingId(null);
+    setSuccess("Holding commission approved and moved to Payment Voucher.");
+    onNavigateToPaymentVoucher?.();
   };
 
   const handleDeleteCase = async () => {
@@ -1055,11 +1356,113 @@ export function PayoutPage({ userId }: { userId: string }) {
     }
   };
 
+  const renderPayoutRow = (row: PayoutDisplayRow) => {
+    const isMemberRow = row.rowType === "member";
+    const companyRow = row.rowType === "company" ? row : null;
+    const isHoldingMemberRow =
+      isMemberRow &&
+      row.payout.payout_type === "tier_upgrade_top_up" &&
+      row.payout.source_commission_structure_id === "holding_commission";
+    const isHoldingCompanyRow =
+      row.rowType === "company" &&
+      row.payoutType === "tier_upgrade_top_up" &&
+      row.sourceCommissionStructureId === "holding_commission";
+    const rowClassName = isHoldingMemberRow || isHoldingCompanyRow
+      ? "border-b border-amber-100 bg-amber-50/40"
+      : "border-b border-gray-50";
+
+    return (
+      <tr key={row.id} className={rowClassName}>
+        <td className="px-6 py-3 text-gray-600">
+          <div className="font-medium text-gray-800">{row.memberLabel}</div>
+          {row.payoutLabel && (
+            <div className="text-xs text-amber-700">{row.payoutLabel}</div>
+          )}
+        </td>
+        <td className="px-6 py-3 text-gray-600">
+          <div className="font-medium text-gray-800">
+            {row.project?.project_name || "-"}
+          </div>
+          <div className="text-xs text-gray-500">
+            {row.record?.unit_number ? `Unit ${row.record.unit_number}` : "-"}
+          </div>
+        </td>
+        <td className="px-6 py-3 text-gray-600">{formatAmount(row.spaPrice)}</td>
+        <td className="px-6 py-3 text-gray-600">{formatAmount(row.nettPrice)}</td>
+        <td className="px-6 py-3 text-gray-600">{formatPercentage(row.commissionPercentage)}</td>
+        <td className="px-6 py-3 text-gray-600">{formatPercentage(row.preLeaderOverridePercentage)}</td>
+        <td className="px-6 py-3 text-gray-600">{formatPercentage(row.leaderOverridePercentage)}</td>
+        <td className="px-6 py-3 text-gray-600">
+          {formatAmount(row.rowType === "company" ? row.totalAmount : row.amount)}
+        </td>
+        <td className="px-6 py-3">
+          {isMemberRow ? (
+            <span className="text-xs text-gray-400">-</span>
+          ) : (
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => companyRow?.record && setSelectedCase(companyRow.record)}
+                disabled={!companyRow?.record}
+                className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-blue-200 text-blue-700 hover:text-blue-800 disabled:opacity-60"
+              >
+                View
+              </button>
+              {isHoldingCompanyRow && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!companyRow) {
+                      return;
+                    }
+
+                    setPendingDelete({ id: companyRow.id, salesCaseId: companyRow.salesCaseId });
+                    setDeleteConfirmationText("");
+                  }}
+                  className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-red-300 text-red-700 hover:text-red-800"
+                >
+                  Remove
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  if (!companyRow) {
+                    return;
+                  }
+
+                  setPendingCompanyReceive(companyRow);
+                  setCompanyReceiptFile(null);
+                  setCompanyReceiveAmount(companyRow.amount.toString());
+                  setCompanyReceiveDate(getLocalDateInputValue(new Date()));
+                  setCompanyReceiveReference("");
+                }}
+                className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
+              >
+                Receive
+              </button>
+              {row.paymentReceiptUrl && (
+                <a
+                  href={row.paymentReceiptUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-primary hover:underline"
+                >
+                  Latest Receipt
+                </a>
+              )}
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
   return (
     <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">Payout</h2>
+          <h2 className="text-2xl font-bold text-gray-900">Payout Approval</h2>
           <p className="text-gray-500 text-sm mt-1">
             Review and settle commission payout rows for approved cases.
           </p>
@@ -1100,6 +1503,65 @@ export function PayoutPage({ userId }: { userId: string }) {
         </div>
       </div>
 
+      <div className="mb-6 grid grid-cols-1 gap-3 md:grid-cols-5">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-700">Filter by Project</label>
+          <select
+            value={selectedProjectFilter}
+            onChange={(event) => setSelectedProjectFilter(event.target.value)}
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary bg-white"
+          >
+            <option value="all">All projects</option>
+            {availableProjectFilters.map((projectName) => (
+              <option key={projectName} value={projectName}>
+                {projectName}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-700">Search Unit / Project</label>
+          <input
+            type="text"
+            value={unitSearchFilter}
+            onChange={(event) => setUnitSearchFilter(event.target.value)}
+            placeholder="e.g. A-3-3"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-700">Sort by Signed LO Date</label>
+          <select
+            value={signedLoDateSort}
+            onChange={(event) => setSignedLoDateSort(event.target.value as "desc" | "asc")}
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary bg-white"
+          >
+            <option value="desc">Newest first</option>
+            <option value="asc">Oldest first</option>
+          </select>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-700">Signed LO From</label>
+          <input
+            type="date"
+            value={signedLoFromDate}
+            onChange={(event) => setSignedLoFromDate(event.target.value)}
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+          />
+          <p className="mt-1 text-xs text-gray-500">Leave blank for all time.</p>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-700">Signed LO To</label>
+          <input
+            type="date"
+            value={signedLoToDate}
+            onChange={(event) => setSignedLoToDate(event.target.value)}
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+          />
+          <p className="mt-1 text-xs text-gray-500">Leave blank for all time.</p>
+        </div>
+      </div>
+
       <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-sm whitespace-nowrap">
@@ -1113,172 +1575,120 @@ export function PayoutPage({ userId }: { userId: string }) {
                 <th className="px-6 py-2">Pre Leader Override %</th>
                 <th className="px-6 py-2">Leader Override %</th>
                 <th className="px-6 py-2">Payout Comm (RM)</th>
-                <th className="px-6 py-2">Payout Date</th>
                 <th className="px-6 py-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody>
-              {payoutDisplayRows.map((row) => {
-                const isMemberRow = row.rowType === "member";
-                const payout = isMemberRow ? row.payout : null;
-                const companyRow = row.rowType === "company" ? row : null;
-                const isBusy = payout ? isUpdatingId === payout.id : false;
+              {filteredGroupedPayoutRows.map((group) => {
+                const isExpanded = expandedProjectUnitKeys.includes(group.key);
+                const groupPrimaryRecord = group.rows.find((row) => row.record)?.record ?? null;
+                const groupStandardMemberRow = group.rows.find(
+                  (row): row is Extract<PayoutDisplayRow, { rowType: "member" }> =>
+                    row.rowType === "member" && row.payout.payout_type !== "tier_upgrade_top_up"
+                ) ?? null;
+                const groupFallbackMemberRow = group.rows.find(
+                  (row): row is Extract<PayoutDisplayRow, { rowType: "member" }> =>
+                    row.rowType === "member"
+                ) ?? null;
+                const groupRejectTarget = groupStandardMemberRow ?? groupFallbackMemberRow;
 
                 return (
-                  <tr key={row.id} className="border-b border-gray-50">
-                    <td className="px-6 py-3 text-gray-600">
-                      <div className="font-medium text-gray-800">{row.memberLabel}</div>
-                      {row.payoutLabel && (
-                        <div className="text-xs text-amber-700">{row.payoutLabel}</div>
-                      )}
-                    </td>
-                    <td className="px-6 py-3 text-gray-600">
-                      <div className="font-medium text-gray-800">
-                        {row.project?.project_name || "-"}
-                      </div>
-                      <div className="text-xs text-gray-500">
-                        {row.record?.unit_number ? `Unit ${row.record.unit_number}` : "-"}
-                      </div>
-                    </td>
-                    <td className="px-6 py-3 text-gray-600">{formatAmount(row.spaPrice)}</td>
-                    <td className="px-6 py-3 text-gray-600">{formatAmount(row.nettPrice)}</td>
-                    <td className="px-6 py-3 text-gray-600">{formatPercentage(row.commissionPercentage)}</td>
-                    <td className="px-6 py-3 text-gray-600">{formatPercentage(row.preLeaderOverridePercentage)}</td>
-                    <td className="px-6 py-3 text-gray-600">{formatPercentage(row.leaderOverridePercentage)}</td>
-                    <td className="px-6 py-3 text-gray-600">
-                      {formatAmount(row.rowType === "company" ? row.totalAmount : row.amount)}
-                    </td>
-                    <td className="px-6 py-3 text-gray-600">
-                      {row.paidAt ? new Date(row.paidAt).toLocaleDateString() : "-"}
-                    </td>
-                    <td className="px-6 py-3">
-                      {isMemberRow && payout ? (
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => row.record && setSelectedCase(row.record)}
-                            disabled={!row.record}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-blue-200 text-blue-700 hover:text-blue-800 disabled:opacity-60"
-                          >
-                            View
-                          </button>
-                          {payout.payout_type !== "tier_upgrade_top_up" && (
+                  <Fragment key={`group-${group.key}`}>
+                    <tr key={`group-${group.key}`} className="border-b border-slate-200 bg-slate-50/80">
+                      <td colSpan={9} className="px-6 py-3">
+                        <div className="flex w-full items-center justify-between gap-4 text-left">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-800">
+                              {group.projectName}
+                            </div>
+                            <div className="text-xs text-slate-500">
+                              Unit {group.unitLabel} · {group.rows.length} payout row{group.rows.length > 1 ? "s" : ""}
+                            </div>
+                            <div className="text-xs text-slate-500">
+                              Signed LO Date: {formatSignedLoDate(group.signedLoDate)}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-end gap-2">
                             <button
                               type="button"
-                              onClick={() => setPendingReject({ id: payout.id, salesCaseId: payout.sales_case_id })}
-                              disabled={isBusy || payout.payout_status === "Paid"}
+                              onClick={() => {
+                                if (groupPrimaryRecord) {
+                                  setSelectedCase(groupPrimaryRecord);
+                                }
+                              }}
+                              disabled={!groupPrimaryRecord}
+                              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-blue-200 text-blue-700 hover:text-blue-800 disabled:opacity-60"
+                            >
+                              View
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (groupRejectTarget) {
+                                  setPendingReject({
+                                    id: groupRejectTarget.id,
+                                    salesCaseId: groupRejectTarget.payout.sales_case_id,
+                                  });
+                                }
+                              }}
+                              disabled={!groupRejectTarget}
                               className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-red-200 text-red-600 hover:text-red-700 disabled:opacity-60"
                             >
                               Reject
                             </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPendingDelete({ id: payout.id, salesCaseId: payout.sales_case_id });
-                              setDeleteConfirmationText("");
-                            }}
-                            disabled={isBusy}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-red-300 text-red-700 hover:text-red-800 disabled:opacity-60"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            Delete
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPendingPaid(payout);
-                              setPaymentReceiptFile(null);
-                              setPayoutDate(getLocalDateInputValue(new Date()));
-                            }}
-                            disabled={isBusy || payout.payout_status === "Paid"}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-blue-200 text-blue-700 hover:text-blue-800 disabled:opacity-60"
-                          >
-                            {payout.payout_status === "Paid" ? "Complete" : "Paid"}
-                          </button>
-                          {row.paymentReceiptUrl && (
-                            <a
-                              href={row.paymentReceiptUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs text-primary hover:underline"
-                            >
-                              Receipt
-                            </a>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => companyRow?.record && setSelectedCase(companyRow.record)}
-                            disabled={!companyRow?.record}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-blue-200 text-blue-700 hover:text-blue-800 disabled:opacity-60"
-                          >
-                            View
-                          </button>
-                          {companyRow?.payoutType !== "tier_upgrade_top_up" && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => companyRow && setPendingReject({ id: companyRow.id, salesCaseId: companyRow.salesCaseId })}
-                                className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-red-200 text-red-600 hover:text-red-700"
-                              >
-                                Reject
-                              </button>
-                            </>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!companyRow) {
-                                return;
-                              }
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!groupRejectTarget) {
+                                  return;
+                                }
 
-                              setPendingDelete({ id: companyRow.id, salesCaseId: companyRow.salesCaseId });
-                              setDeleteConfirmationText("");
-                            }}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-red-300 text-red-700 hover:text-red-800"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            Delete
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!companyRow) {
-                                return;
-                              }
-
-                              setPendingCompanyReceive(companyRow);
-                              setCompanyReceiptFile(null);
-                              setCompanyReceiveAmount(companyRow.amount.toString());
-                              setCompanyReceiveDate(getLocalDateInputValue(new Date()));
-                              setCompanyReceiveReference("");
-                            }}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
-                          >
-                            Receive
-                          </button>
-                          {row.paymentReceiptUrl && (
-                            <a
-                              href={row.paymentReceiptUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs text-primary hover:underline"
+                                void handleApproveFirstComm(groupRejectTarget.payout.sales_case_id);
+                              }}
+                              disabled={!groupRejectTarget || isUpdatingId === groupRejectTarget.payout.sales_case_id}
+                              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-emerald-200 text-emerald-700 hover:text-emerald-800"
                             >
-                              Latest Receipt
-                            </a>
-                          )}
+                              {groupRejectTarget && isUpdatingId === groupRejectTarget.payout.sales_case_id
+                                ? "Approving..."
+                                : "Approve 1st Comm"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!groupRejectTarget) {
+                                  return;
+                                }
+
+                                void handleApproveHoldingComm(groupRejectTarget.payout.sales_case_id);
+                              }}
+                              disabled={!groupRejectTarget || isUpdatingId === groupRejectTarget.payout.sales_case_id}
+                              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-emerald-200 text-emerald-700 hover:text-emerald-800"
+                            >
+                              {groupRejectTarget && isUpdatingId === groupRejectTarget.payout.sales_case_id
+                                ? "Approving..."
+                                : "Approve Holding Comm"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleProjectUnitGroup(group.key)}
+                              className="inline-flex items-center justify-center rounded-md border border-gray-200 p-1.5 text-slate-500 hover:text-slate-700"
+                              aria-label={isExpanded ? "Collapse payout group" : "Expand payout group"}
+                            >
+                              <ChevronDown
+                                className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                              />
+                            </button>
+                          </div>
                         </div>
-                      )}
-                    </td>
-                  </tr>
+                      </td>
+                    </tr>
+                    {isExpanded && group.rows.map((row) => renderPayoutRow(row))}
+                  </Fragment>
                 );
               })}
-              {payoutDisplayRows.length === 0 && (
+              {filteredGroupedPayoutRows.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="py-6 text-center text-gray-500">
+                  <td colSpan={9} className="py-6 text-center text-gray-500">
                     No payout rows found.
                   </td>
                 </tr>
@@ -1402,17 +1812,17 @@ export function PayoutPage({ userId }: { userId: string }) {
             <div className="px-5 py-4 border-b border-gray-100">
               <h3 className="text-lg font-semibold text-gray-800">
                 {pendingDeleteCompanyRow?.payoutType === "tier_upgrade_top_up"
-                  ? "Delete top-up company row"
+                  ? "Remove holding company row"
                   : pendingDeletePayout?.payout_type === "tier_upgrade_top_up"
-                    ? "Delete top-up payout row"
-                    : "Delete payout case"}
+                    ? "Remove holding payout row"
+                    : "Remove row"}
               </h3>
               <p className="text-sm text-gray-500 mt-1">
                 {pendingDeleteCompanyRow?.payoutType === "tier_upgrade_top_up"
                   ? "This will remove only this company top-up row from the payout page. The sales case and member top-up rows will remain unchanged."
                   : pendingDeletePayout?.payout_type === "tier_upgrade_top_up"
                     ? "This will remove only this top-up row from the payout page. The original sales case will remain unchanged."
-                    : "This will permanently delete the unit case and all related payout rows."}
+                    : "This action removes only the selected row from payout approval."}
               </p>
             </div>
             <div className="px-5 py-4 space-y-4 text-sm text-gray-600">
@@ -1432,10 +1842,10 @@ export function PayoutPage({ userId }: { userId: string }) {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Type <span className="font-semibold">CONFIRM</span> to {pendingDeleteCompanyRow?.payoutType === "tier_upgrade_top_up"
-                    ? "delete this company top-up row"
+                    ? "remove this company holding row"
                     : pendingDeletePayout?.payout_type === "tier_upgrade_top_up"
-                      ? "delete this top-up row"
-                      : "delete this case"}
+                      ? "remove this holding row"
+                      : "remove this row"}
                 </label>
                 <input
                   type="text"
@@ -1464,12 +1874,12 @@ export function PayoutPage({ userId }: { userId: string }) {
                 className="px-4 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
               >
                 {isUpdatingId === pendingDelete.id
-                  ? "Deleting..."
+                  ? "Removing..."
                   : pendingDeleteCompanyRow?.payoutType === "tier_upgrade_top_up"
-                    ? "Delete Row"
+                    ? "Remove"
                     : pendingDeletePayout?.payout_type === "tier_upgrade_top_up"
-                      ? "Delete Row"
-                      : "Delete Case"}
+                      ? "Remove"
+                      : "Remove"}
               </button>
             </div>
           </div>

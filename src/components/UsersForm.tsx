@@ -4,11 +4,11 @@ import { supabase } from "../lib/supabaseClient";
 import { getMemberRankSummary, type MemberRankSummary, type RankCase, type RankPayout, type RankProfile } from "../lib/memberRanks";
 
 const roleOptions = ["super_admin", "admin", "leader", "agent"] as const;
-const createRoleOptions = ["super_admin", "admin", "agent"] as const;
+const createRoleOptions = ["super_admin", "admin", "leader", "agent"] as const;
 const memberRankOptions = ["agent", "pre_leader", "leader"] as const;
 
 const getDefaultMemberRankForRole = (role: string | null | undefined): (typeof memberRankOptions)[number] =>
-  role === "super_admin" ? "leader" : "agent";
+  role === "super_admin" || role === "leader" ? "leader" : "agent";
 
 type UserProfile = RankProfile & {
   name: string | null;
@@ -69,6 +69,7 @@ const formatPointValue = (value: number | null | undefined) => {
 };
 
 export function UsersForm() {
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<(typeof roleOptions)[number]>("admin");
@@ -107,10 +108,8 @@ export function UsersForm() {
   const [rankFilter, setRankFilter] = useState<"all" | (typeof memberRankOptions)[number]>("all");
   const [activeFilter, setActiveFilter] = useState<"all" | "active" | "inactive">("all");
 
-  const shouldRequireRank = role === "agent" || role === "leader";
-  const shouldSelectRecruiter = role === "agent" || role === "leader";
-  const shouldRequireGroupPoints = shouldRequireRank && (rank === "pre_leader" || rank === "leader");
-  const shouldShowGroupPoints = shouldRequireGroupPoints && supportsGroupPoints;
+  const shouldRequireRank = role === "agent";
+  const shouldSelectRecruiter = role === "agent";
 
   const profilesById = useMemo(() => {
     const map = new Map<string, UserProfile>();
@@ -259,7 +258,7 @@ export function UsersForm() {
       return null;
     }
 
-    if (shouldShowGroupPoints && (!Number.isFinite(parsedGroupPoints) || parsedGroupPoints < 0)) {
+    if (supportsGroupPoints && (!Number.isFinite(parsedGroupPoints) || parsedGroupPoints < 0)) {
       return null;
     }
 
@@ -271,7 +270,7 @@ export function UsersForm() {
       rank,
       recruit_by: shouldSelectRecruiter ? recruitById || null : null,
       personal_points: parsedPersonalPoints,
-      group_points: shouldShowGroupPoints ? parsedGroupPoints : 0,
+      group_points: supportsGroupPoints ? parsedGroupPoints : 0,
       bank_name: null,
       bank_account_number: null,
       is_active: true,
@@ -282,7 +281,7 @@ export function UsersForm() {
     };
 
     return getMemberRankSummary(draftProfile, [...profiles, draftProfile], rankCases, rankPayouts);
-  }, [email, groupPoints, personalPoints, profiles, rank, rankCases, rankPayouts, recruitById, role, shouldRequireRank, shouldSelectRecruiter, shouldShowGroupPoints]);
+  }, [email, groupPoints, personalPoints, profiles, rank, rankCases, rankPayouts, recruitById, role, shouldRequireRank, shouldSelectRecruiter, supportsGroupPoints]);
 
   const getStoragePathFromUrl = (url: string, bucket: string) => {
     if (!url) {
@@ -482,7 +481,7 @@ export function UsersForm() {
       return;
     }
 
-    if ((editRole === "agent" || editRole === "leader") && (editRank === "pre_leader" || editRank === "leader") && supportsGroupPoints && (!Number.isFinite(parsedGroupPoints) || parsedGroupPoints < 0)) {
+    if (supportsGroupPoints && (!Number.isFinite(parsedGroupPoints) || parsedGroupPoints < 0)) {
       setError("Please enter valid group points for this member.");
       return;
     }
@@ -496,7 +495,14 @@ export function UsersForm() {
       const updatePayload: Record<string, unknown> = {
         name: editName,
         role: editRole,
-        rank: editRole === "super_admin" ? "leader" : editRole === "admin" ? null : editRank,
+        rank:
+          editRole === "super_admin"
+            ? "leader"
+            : editRole === "admin"
+              ? null
+              : editRole === "leader"
+                ? "leader"
+                : editRank,
         recruit_by:
           editRole === "agent" || editRole === "leader" ? editRecruitById || null : null,
         personal_points: editRole === "agent" || editRole === "leader" ? parsedPersonalPoints : 0,
@@ -509,21 +515,24 @@ export function UsersForm() {
       };
 
       if (supportsGroupPoints) {
-        updatePayload.group_points =
-          editRole === "agent" || editRole === "leader"
-            ? editRank === "pre_leader" || editRank === "leader"
-              ? parsedGroupPoints
-              : 0
-            : 0;
+        updatePayload.group_points = parsedGroupPoints;
       }
 
-      const { error: updateError } = await supabase
+      const { data: updatedProfile, error: updateError } = await supabase
         .from("profiles")
         .update(updatePayload)
-        .eq("id", editingId);
+        .eq("id", editingId)
+        .select("id, role")
+        .maybeSingle();
 
       if (updateError) {
         setError(updateError.message);
+        setIsSavingProfile(false);
+        return;
+      }
+
+      if (!updatedProfile) {
+        setError("Unable to update this account. Please check your permission and try again.");
         setIsSavingProfile(false);
         return;
       }
@@ -649,13 +658,19 @@ export function UsersForm() {
     const parsedPersonalPoints = Number(personalPoints);
     const parsedGroupPoints = Number(groupPoints);
 
+    if (!name.trim()) {
+      setError("Please enter name.");
+      setIsSubmitting(false);
+      return;
+    }
+
     if (shouldRequireRank && (!Number.isFinite(parsedPersonalPoints) || parsedPersonalPoints < 0)) {
       setError("Please enter valid personal points for this member.");
       setIsSubmitting(false);
       return;
     }
 
-    if (shouldShowGroupPoints && (!Number.isFinite(parsedGroupPoints) || parsedGroupPoints < 0)) {
+    if (supportsGroupPoints && (!Number.isFinite(parsedGroupPoints) || parsedGroupPoints < 0)) {
       setError("Please enter valid group points for this member.");
       setIsSubmitting(false);
       return;
@@ -666,13 +681,23 @@ export function UsersForm() {
     setSuccess(null);
 
     const nextRecruitBy = shouldSelectRecruiter ? recruitById || null : null;
-    const derivedRank = role === "super_admin" ? "leader" : role === "admin" ? null : shouldRequireRank ? rank : null;
+    const derivedRank =
+      role === "super_admin"
+        ? "leader"
+        : role === "admin"
+          ? null
+          : role === "leader"
+            ? "leader"
+            : shouldRequireRank
+              ? rank
+              : null;
     const createdEmail = email;
 
     const createUserPayload: Record<string, unknown> = {
       email,
       password,
       role,
+      name: name.trim(),
     };
 
     if (shouldRequireRank) {
@@ -718,6 +743,7 @@ export function UsersForm() {
 
     if (createdProfileId) {
       const updatePayload: Record<string, unknown> = {
+        name: name.trim(),
         role,
         recruit_by: nextRecruitBy,
         personal_points: shouldRequireRank ? parsedPersonalPoints : 0,
@@ -725,7 +751,7 @@ export function UsersForm() {
       };
 
       if (supportsGroupPoints) {
-        updatePayload.group_points = shouldShowGroupPoints ? parsedGroupPoints : 0;
+        updatePayload.group_points = parsedGroupPoints;
       }
 
       const { error: updateCreatedProfileError } = await supabase
@@ -742,6 +768,7 @@ export function UsersForm() {
     }
 
     setSuccess("User created successfully.");
+    setName("");
     setEmail("");
     setPassword("");
     setRole("admin");
@@ -790,6 +817,17 @@ export function UsersForm() {
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input
+                type="text"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="User full name"
+                className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                required
+              />
+            </div>
+            <div className="md:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
               <input
                 type="email"
@@ -815,7 +853,14 @@ export function UsersForm() {
               <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
               <select
                 value={role}
-                onChange={(event) => setRole(event.target.value as (typeof roleOptions)[number])}
+                onChange={(event) => {
+                  const nextRole = event.target.value as (typeof roleOptions)[number];
+                  setRole(nextRole);
+                  setRank(getDefaultMemberRankForRole(nextRole));
+                  if (nextRole !== "agent") {
+                    setRecruitById("");
+                  }
+                }}
                 className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none bg-white"
               >
                 {createRoleOptions.map((option) => (
@@ -866,7 +911,7 @@ export function UsersForm() {
                 <p className="mt-1 text-xs text-gray-500">1 point = RM 1 commission.</p>
               </div>
             )}
-            {shouldShowGroupPoints && (
+            {supportsGroupPoints && (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Group Points</label>
                 <div className="flex gap-2">
@@ -878,7 +923,6 @@ export function UsersForm() {
                     onChange={(event) => setGroupPoints(event.target.value)}
                     placeholder="Enter group points"
                     className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none"
-                    required
                   />
                   <button
                     type="button"
@@ -888,7 +932,7 @@ export function UsersForm() {
                     Start from 0
                   </button>
                 </div>
-                <p className="mt-1 text-xs text-gray-500">Includes personal points.</p>
+                <p className="mt-1 text-xs text-gray-500">Can be set for any role.</p>
               </div>
             )}
             {shouldSelectRecruiter && (
@@ -1162,7 +1206,14 @@ export function UsersForm() {
                   <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
                   <select
                     value={editRole}
-                    onChange={(event) => setEditRole(event.target.value as (typeof roleOptions)[number])}
+                    onChange={(event) => {
+                      const nextRole = event.target.value as (typeof roleOptions)[number];
+                      setEditRole(nextRole);
+                      setEditRank(getDefaultMemberRankForRole(nextRole));
+                      if (nextRole !== "agent") {
+                        setEditRecruitById("");
+                      }
+                    }}
                     className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none bg-white"
                   >
                     {roleOptions.map((option) => (
@@ -1172,7 +1223,7 @@ export function UsersForm() {
                     ))}
                   </select>
                 </div>
-                {(editRole === "agent" || editRole === "leader") && (
+                {editRole === "agent" && (
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Starting Role</label>
                     <select
@@ -1188,6 +1239,7 @@ export function UsersForm() {
                     </select>
                   </div>
                 )}
+                {editRole === "agent" && (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Recruit By</label>
                   <select
@@ -1203,6 +1255,7 @@ export function UsersForm() {
                     ))}
                   </select>
                 </div>
+                )}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Personal Points</label>
                   <div className="flex gap-2">
@@ -1225,7 +1278,7 @@ export function UsersForm() {
                   </div>
                   <p className="mt-1 text-xs text-gray-500">1 point = RM 1 commission.</p>
                 </div>
-                {supportsGroupPoints && (editRole === "agent" || editRole === "leader") && (editRank === "pre_leader" || editRank === "leader") && (
+                {supportsGroupPoints && (
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Group Points</label>
                     <div className="flex gap-2">
@@ -1246,7 +1299,7 @@ export function UsersForm() {
                         Start from 0
                       </button>
                     </div>
-                    <p className="mt-1 text-xs text-gray-500">Includes personal points.</p>
+                    <p className="mt-1 text-xs text-gray-500">Can be set for any role.</p>
                   </div>
                 )}
                 <div>

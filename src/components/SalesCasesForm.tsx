@@ -2,8 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { fetchNotificationProfiles, notifyDeleteRequest } from "../lib/notifications";
 import { supabase } from "../lib/supabaseClient";
-import { getCaseCommissionStructure, getShortCommissionStructureLabel } from "../lib/commissionStructures";
+import {
+  getCaseCommissionStructure,
+  getDirectCommissionPercentage,
+  getHoldingCommissionPercentage,
+  getShortCommissionStructureLabel,
+} from "../lib/commissionStructures";
 import { getCasePersonalAmountForProfile, getStoredInvolvedProfileId } from "../lib/salesCaseMetrics";
+import { buildCommissionStructureByTotalPercentage } from "../lib/salesCasePayouts";
 import {
   getCaseStatusClasses,
   hasCaseWorkflowColumns,
@@ -30,10 +36,19 @@ type SalesCasesFormProps = {
 type SalesCaseListRow =
   | {
       id: string;
-      rowType: "case";
+      rowType: "direct";
       record: SalesCaseRecord;
       payout: null;
       createdAt: string;
+      holdingAmount: null;
+    }
+  | {
+      id: string;
+      rowType: "holding";
+      record: SalesCaseRecord;
+      payout: null;
+      createdAt: string;
+      holdingAmount: number;
     }
   | {
       id: string;
@@ -41,6 +56,7 @@ type SalesCaseListRow =
       record: SalesCaseRecord;
       payout: SalesCasePayoutRecord;
       createdAt: string;
+      holdingAmount: null;
     };
 
 type TopUpSalesCaseListRow = Extract<SalesCaseListRow, { rowType: "top_up" }>;
@@ -61,6 +77,7 @@ type DisplaySalesCaseRow = {
   displayStatus: string;
   displayCommission: number | null;
   topUpLabel: string | null;
+  rowTypeLabel: string;
 };
 
 const MONTH_OPTIONS = [
@@ -137,7 +154,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
   const [selectedYearValue, setSelectedYearValue] = useState(() => `${today.getFullYear()}`);
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | string>("all");
-  const [rowTypeFilter, setRowTypeFilter] = useState<"all" | "case" | "top_up">("all");
+  const [rowTypeFilter, setRowTypeFilter] = useState<"all" | "direct" | "top_up">("all");
 
   const caseWorkflowEnabled = useMemo(
     () => cases.some((record) => hasCaseWorkflowColumns(record)),
@@ -166,14 +183,187 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
     return map;
   }, [payouts]);
 
+  const getViewerHoldingCommission = (record: SalesCaseRecord) => {
+    const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
+    const commissionStructure = getCaseCommissionStructure(record, project);
+    const holdingPercentage = getHoldingCommissionPercentage(commissionStructure);
+    const holdingCommissionStructure = commissionStructure
+      ? buildCommissionStructureByTotalPercentage(
+          commissionStructure,
+          holdingPercentage,
+          `${commissionStructure.id}-holding`,
+          commissionStructure.label,
+        )
+      : null;
+
+    if (!project || holdingPercentage <= 0 || !commissionStructure || !holdingCommissionStructure) {
+      return 0;
+    }
+
+    const viewerProfile = profileMap.get(userId) ?? null;
+    const creatorProfile = record.created_by
+      ? record.created_by === userId
+        ? viewerProfile
+        : profileMap.get(record.created_by) ?? null
+      : null;
+    const explicitInvolvedProfileId = getStoredInvolvedProfileId(record);
+    const involvedProfile = explicitInvolvedProfileId
+      ? explicitInvolvedProfileId === userId
+        ? viewerProfile
+        : profileMap.get(explicitInvolvedProfileId) ?? null
+      : null;
+
+    if (!viewerProfile) {
+      return 0;
+    }
+
+    const participantIds = Array.from(
+      new Set([record.created_by, explicitInvolvedProfileId].filter(Boolean))
+    ) as string[];
+
+    const participants = [creatorProfile, involvedProfile].filter(
+      (profile, index, array): profile is ProfileOption =>
+        Boolean(profile) && array.findIndex((item) => item?.id === profile?.id) === index
+    );
+
+    if (participantIds.length === 0) {
+      return 0;
+    }
+
+    const splitAgentPercentage = (holdingCommissionStructure.agent_commission ?? 0) / participantIds.length;
+    const splitPreLeaderPercentage = (holdingCommissionStructure.pre_leader_override ?? 0) / participantIds.length;
+    const splitLeaderPercentage = (holdingCommissionStructure.leader_override ?? 0) / participantIds.length;
+    let totalPercentage = 0;
+
+    const getHoldingLeaderChain = (
+      profile: ProfileOption | null,
+      visitedIds = new Set<string>()
+    ) => {
+      if (!profile) {
+        return { preLeader: null, leader: null };
+      }
+
+      if (visitedIds.has(profile.id)) {
+        return { preLeader: null, leader: null };
+      }
+
+      const nextVisitedIds = new Set(visitedIds);
+      nextVisitedIds.add(profile.id);
+
+      if (profile.rank === "leader") {
+        return { preLeader: null, leader: profile };
+      }
+
+      const recruiter = profile.recruit_by ? profileMap.get(profile.recruit_by) ?? null : null;
+
+      if (!recruiter) {
+        return { preLeader: null, leader: null };
+      }
+
+      if (recruiter.rank === "leader") {
+        return { preLeader: null, leader: recruiter };
+      }
+
+      if (recruiter.rank === "pre_leader") {
+        const leader = recruiter.recruit_by ? profileMap.get(recruiter.recruit_by) ?? null : null;
+        return { preLeader: recruiter, leader };
+      }
+
+      if (recruiter.rank === "agent") {
+        return getHoldingLeaderChain(recruiter, nextVisitedIds);
+      }
+
+      return { preLeader: null, leader: null };
+    };
+
+    participants.forEach((participant) => {
+      const chain = getHoldingLeaderChain(participant);
+
+      if (participant.id === userId) {
+        totalPercentage += splitAgentPercentage;
+      }
+
+      if (participant.rank === "agent") {
+        const preLeaderRecipient = chain.preLeader ?? chain.leader;
+
+        if (preLeaderRecipient?.id === userId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+
+        if (chain.leader?.id === userId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+
+        return;
+      }
+
+      if (participant.rank === "pre_leader") {
+        if (participant.id === userId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+
+        if (chain.leader?.id === userId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+
+        return;
+      }
+
+      if (participant.rank === "leader" && participant.id === userId) {
+        totalPercentage += splitPreLeaderPercentage + splitLeaderPercentage;
+      }
+    });
+
+    return (record.nett_price ?? 0) * (totalPercentage / 100);
+  };
+
+  const isReleasedHoldingTopUp = (payout: SalesCasePayoutRecord) => {
+    if (payout.payout_type !== "tier_upgrade_top_up") {
+      return false;
+    }
+
+    const source = (payout.source_commission_structure_id ?? "").toLowerCase();
+    const target = (payout.target_commission_structure_id ?? "").toLowerCase();
+    const sourceLabel = (payout.source_commission_structure_label ?? "").toLowerCase();
+    const targetLabel = (payout.target_commission_structure_label ?? "").toLowerCase();
+
+    const sourceMatches = source === "holding_commission" || sourceLabel === "holding commission";
+    const targetMatches = target === "released" || targetLabel === "released";
+
+    return sourceMatches && targetMatches;
+  };
+
   const salesCaseRows = useMemo<SalesCaseListRow[]>(() => {
-    const baseRows: SalesCaseListRow[] = cases.map((record) => ({
-      id: record.id,
-      rowType: "case",
-      record,
-      payout: null,
-      createdAt: record.created_at,
-    }));
+    const baseRows: SalesCaseListRow[] = cases.flatMap((record) => {
+      const directRow: SalesCaseListRow = {
+        id: `${record.id}-direct`,
+        rowType: "direct",
+        record,
+        payout: null,
+        createdAt: record.created_at,
+        holdingAmount: null,
+      };
+
+      const hasReleasedHoldingTopUp = payouts.some(
+        (payout) =>
+          payout.sales_case_id === record.id &&
+          payout.profile_id === userId &&
+          isReleasedHoldingTopUp(payout)
+      );
+      const holdingAmount = getViewerHoldingCommission(record);
+      const holdingRow = !hasReleasedHoldingTopUp && holdingAmount > 0
+        ? {
+            id: `${record.id}-holding`,
+            rowType: "holding" as const,
+            record,
+            payout: null,
+            createdAt: record.created_at,
+            holdingAmount,
+          }
+        : null;
+
+      return holdingRow ? [directRow, holdingRow] : [directRow];
+    });
 
     const topUpRows = payouts
       .filter((payout) => payout.payout_type === "tier_upgrade_top_up" && payout.profile_id === userId)
@@ -190,6 +380,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
           record,
           payout,
           createdAt: payout.created_at,
+          holdingAmount: null,
         };
       })
       .filter((row): row is TopUpSalesCaseListRow => Boolean(row));
@@ -199,7 +390,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
       const leftTime = new Date(left.createdAt).getTime();
       return rightTime - leftTime;
     });
-  }, [cases, payouts, userId]);
+  }, [cases, payouts, profileMap, projectMap, userId]);
 
   const fetchCases = async () => {
     setError(null);
@@ -236,7 +427,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
     const { data, error: fetchError } = await supabase
       .from("projects")
       .select(
-        "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, commission_structures, default_commission_structure_id"
+        "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, direct_commission, holding_commission, commission_structures, default_commission_structure_id"
       )
       .eq("is_hidden", false)
       .order("created_at", { ascending: false });
@@ -350,6 +541,15 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
   const getViewerCommission = (record: SalesCaseRecord) => {
     const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
     const commissionStructure = getCaseCommissionStructure(record, project);
+    const directPercentage = getDirectCommissionPercentage(commissionStructure);
+    const directCommissionStructure = commissionStructure
+      ? buildCommissionStructureByTotalPercentage(
+          commissionStructure,
+          directPercentage,
+          `${commissionStructure.id}-direct`,
+          commissionStructure.label,
+        )
+      : null;
     const viewerProfile = profileMap.get(userId) ?? null;
     const creatorProfile = record.created_by
       ? record.created_by === userId
@@ -363,7 +563,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
         : profileMap.get(involvedUserId) ?? null
       : null;
 
-    if (!project || !viewerProfile || !commissionStructure) {
+    if (!project || !viewerProfile || !commissionStructure || !directCommissionStructure) {
       return null;
     }
 
@@ -380,9 +580,9 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
       return null;
     }
 
-    const splitAgentPercentage = (commissionStructure.agent_commission ?? 0) / participantIds.length;
-    const splitPreLeaderPercentage = (commissionStructure.pre_leader_override ?? 0) / participantIds.length;
-    const splitLeaderPercentage = (commissionStructure.leader_override ?? 0) / participantIds.length;
+    const splitAgentPercentage = (directCommissionStructure.agent_commission ?? 0) / participantIds.length;
+    const splitPreLeaderPercentage = (directCommissionStructure.pre_leader_override ?? 0) / participantIds.length;
+    const splitLeaderPercentage = (directCommissionStructure.leader_override ?? 0) / participantIds.length;
     let totalPercentage = 0;
 
     participants.forEach((participant) => {
@@ -449,10 +649,19 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
         : viewerPayout?.payout_status === "Paid"
           ? "Completed"
           : status;
-      const displayCommission = topUpPayout ? topUpPayout.total_amount : viewerCommission;
+      const displayCommission = topUpPayout
+        ? topUpPayout.total_amount
+        : row.rowType === "holding"
+          ? row.holdingAmount
+          : viewerCommission;
       const topUpLabel = topUpPayout
         ? `${getShortCommissionStructureLabel(topUpPayout.source_commission_structure_label) || topUpPayout.source_commission_structure_id || "Previous Tier"} -> ${getShortCommissionStructureLabel(topUpPayout.target_commission_structure_label) || topUpPayout.target_commission_structure_id || "New Tier"}`
         : null;
+      const rowTypeLabel = row.rowType === "top_up"
+        ? "Top-up"
+        : row.rowType === "holding"
+          ? "Holding Comm"
+          : "Direct Comm";
 
       return {
         row,
@@ -470,6 +679,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
         displayStatus,
         displayCommission,
         topUpLabel,
+        rowTypeLabel,
       };
     });
   }, [payoutMap, profileMap, projectMap, salesCaseRows, userId]);
@@ -529,7 +739,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
   }, [rowTypeFilter, selectedMonthRows, statusFilter]);
 
   const selectedMonthBaseRows = useMemo(() => {
-    return selectedMonthRows.filter((item) => item.row.rowType === "case");
+    return selectedMonthRows.filter((item) => item.row.rowType === "direct");
   }, [selectedMonthRows]);
 
   const totalMonthlyGDV = useMemo(
@@ -551,11 +761,18 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
   );
 
   const totalMonthlySales = useMemo(
-    () => selectedMonthBaseRows.reduce((sum, item) => sum + (item.displayCommission ?? 0), 0),
-    [selectedMonthBaseRows]
+    () => selectedMonthRows.reduce((sum, item) => sum + (item.displayCommission ?? 0), 0),
+    [selectedMonthRows]
   );
 
-  const totalMonthlyCaseCount = useMemo(() => selectedMonthBaseRows.length, [selectedMonthBaseRows]);
+  const totalMonthlyCaseCount = useMemo(
+    () =>
+      selectedMonthBaseRows.reduce((sum, item) => {
+        const hasInvolvedSalesperson = Boolean(getStoredInvolvedProfileId(item.row.record));
+        return sum + (hasInvolvedSalesperson ? 0.5 : 1);
+      }, 0),
+    [selectedMonthBaseRows]
+  );
 
   const totalMonthlyPendingCases = useMemo(
     () =>
@@ -743,11 +960,11 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
             <label className="mb-1 block text-xs font-medium text-gray-700">Filter by Row Type</label>
             <select
               value={rowTypeFilter}
-              onChange={(event) => setRowTypeFilter(event.target.value as "all" | "case" | "top_up")}
+              onChange={(event) => setRowTypeFilter(event.target.value as "all" | "direct" | "top_up")}
               className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary bg-white"
             >
               <option value="all">All rows</option>
-              <option value="case">Sales cases</option>
+              <option value="direct">Direct comm rows</option>
               <option value="top_up">Top-up rows</option>
             </select>
           </div>
@@ -764,6 +981,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
                 <th className="px-6 py-2">Nett Price (RM)</th>
                 <th className="px-6 py-2">Created By</th>
                 <th className="px-6 py-2">Booking Form</th>
+                <th className="px-6 py-2">Row Type</th>
                 <th className="px-6 py-2">Status</th>
                 <th className="px-6 py-2">Commission</th>
                 <th className="px-6 py-2 text-right">Actions</th>
@@ -771,7 +989,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
             </thead>
             <tbody>
               {filteredSalesCaseRows.map((item) => {
-                const { row, record, projectName, topUpPayout, isCreator, isDeleteRequested, creatorLabel, createdAt, bookingDate, isLocked, viewerPayout, displayStatus, displayCommission, topUpLabel } = {
+                const { row, record, projectName, topUpPayout, isCreator, isDeleteRequested, creatorLabel, createdAt, bookingDate, isLocked, viewerPayout, displayStatus, displayCommission, topUpLabel, rowTypeLabel } = {
                   row: item.row,
                   record: item.row.record,
                   projectName: item.projectName,
@@ -786,9 +1004,10 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
                   displayStatus: item.displayStatus,
                   displayCommission: item.displayCommission,
                   topUpLabel: item.topUpLabel,
+                  rowTypeLabel: item.rowTypeLabel,
                 };
                 const isPersonallyRelatedCase =
-                  row.rowType === "case" &&
+                  row.rowType === "direct" &&
                   (isCreator || getStoredInvolvedProfileId(record) === userId);
 
                 return (
@@ -824,6 +1043,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
                         "-"
                       )}
                     </td>
+                    <td className="px-6 py-3 text-gray-600">{rowTypeLabel}</td>
                     <td className="px-6 py-3 text-gray-600">
                       <span
                         className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${getCaseStatusClasses(displayStatus)}`}
@@ -848,7 +1068,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
                     <td className="px-6 py-3 text-gray-600">{formatCurrency(displayCommission)}</td>
                     <td className="px-6 py-3">
                       <div className="flex items-center justify-end gap-2">
-                        {row.rowType === "case" && isCreator && !isLocked ? (
+                        {row.rowType !== "top_up" && isCreator && !isLocked ? (
                           <>
                             <button
                               type="button"
@@ -896,7 +1116,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
               })}
               {filteredSalesCaseRows.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="py-6 text-center text-gray-500">
+                  <td colSpan={12} className="py-6 text-center text-gray-500">
                     No cases found.
                   </td>
                 </tr>

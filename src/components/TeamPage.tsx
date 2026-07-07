@@ -49,6 +49,138 @@ type TeamCaseRow = {
   completedCommission: number;
 };
 
+type PaymentVoucherFinanceEntry = {
+  amount: number;
+  attachment_url: string | null;
+  reference_detail: string | null;
+};
+
+type PaymentVoucherMeta = {
+  componentKeys?: string[];
+  profileIds?: string[];
+  memberLabels?: string[];
+  grossAmount?: number;
+};
+
+const HISTORY_META_SEPARATOR = "|||META|||";
+
+const parsePaymentVoucherMeta = (referenceDetail: string | null | undefined) => {
+  const rawDetail = (referenceDetail ?? "").trim();
+  const [, metaPayload] = rawDetail.split(HISTORY_META_SEPARATOR);
+
+  if (!metaPayload) {
+    return null;
+  }
+
+  try {
+    const [metaJson] = metaPayload.split(" | ");
+    return JSON.parse(metaJson) as PaymentVoucherMeta;
+  } catch {
+    return null;
+  }
+};
+
+const deriveGrossAmountFromHistory = (finalAmount: number, referenceDetail: string | null | undefined) => {
+  const meta = parsePaymentVoucherMeta(referenceDetail);
+
+  if (meta?.grossAmount !== undefined && meta.grossAmount !== null) {
+    return Number(Number(meta.grossAmount).toFixed(2));
+  }
+
+  const normalizedDetail = (referenceDetail ?? "").toLowerCase();
+  const hasSst = normalizedDetail.includes("deduct sst 8%");
+  const hasWht =
+    normalizedDetail.includes("deduct wht 2%") ||
+    normalizedDetail.includes("deduct withholding tax 2%");
+
+  if (hasSst && hasWht) {
+    return Number(((finalAmount * 1.08) / 0.98).toFixed(2));
+  }
+
+  if (hasSst) {
+    return Number((finalAmount * 1.08).toFixed(2));
+  }
+
+  if (hasWht) {
+    return Number((finalAmount / 0.98).toFixed(2));
+  }
+
+  return Number(finalAmount.toFixed(2));
+};
+
+const getStandardPayoutComponentRows = (payout: SalesCasePayoutRecord) => {
+  const components = [
+    { keySuffix: "-comm", percentage: payout.agent_commission_percentage },
+    { keySuffix: "-pre-leader-override", percentage: payout.pre_leader_override_percentage },
+    { keySuffix: "-leader-override", percentage: payout.leader_override_percentage },
+  ].filter((item) => item.percentage > 0);
+
+  if (components.length === 0) {
+    return [] as Array<{ key: string; amount: number }>;
+  }
+
+  if (components.length === 1) {
+    return [{ key: `${payout.id}${components[0].keySuffix}`, amount: Number(payout.total_amount ?? 0) }];
+  }
+
+  const totalPercentage = components.reduce((sum, item) => sum + item.percentage, 0);
+  let allocatedAmount = 0;
+
+  return components.map((item, index) => {
+    const isLast = index === components.length - 1;
+    const baseAmount = Number(payout.total_amount ?? 0);
+    const amount = isLast
+      ? Number((baseAmount - allocatedAmount).toFixed(2))
+      : Number(((baseAmount * item.percentage) / totalPercentage).toFixed(2));
+
+    if (!isLast) {
+      allocatedAmount += amount;
+    }
+
+    return {
+      key: `${payout.id}${item.keySuffix}`,
+      amount,
+    };
+  });
+};
+
+const getPayoutIdFromComponentKey = (componentKey: string) => {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(componentKey)) {
+    return componentKey;
+  }
+
+  const uuidPrefixMatch = componentKey.match(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-/);
+
+  if (uuidPrefixMatch?.[1]) {
+    return uuidPrefixMatch[1];
+  }
+
+  const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+  const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
+
+  if (!matchedSuffix) {
+    return null;
+  }
+
+  return componentKey.slice(0, -matchedSuffix.length);
+};
+
+const isReleasedHoldingPayout = (payout: SalesCasePayoutRecord) => {
+  if (payout.payout_type !== "tier_upgrade_top_up") {
+    return false;
+  }
+
+  const source = (payout.source_commission_structure_id ?? "").toLowerCase();
+  const target = (payout.target_commission_structure_id ?? "").toLowerCase();
+  const sourceLabel = (payout.source_commission_structure_label ?? "").toLowerCase();
+  const targetLabel = (payout.target_commission_structure_label ?? "").toLowerCase();
+
+  const sourceMatches = source === "holding_commission" || sourceLabel === "holding commission";
+  const targetMatches = target === "released" || targetLabel === "released";
+
+  return sourceMatches && targetMatches;
+};
+
 const MONTH_OPTIONS = [
   { value: "all", label: "All Time" },
   { value: "01", label: "Jan" },
@@ -99,6 +231,13 @@ const formatDate = (value: string | null) => {
 };
 
 const formatRankLabel = (value: string | null | undefined) => (value ? value.replace("_", " ") : "-");
+const normalizeLabel = (value: string | null | undefined) =>
+  (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^a-z0-9@.\s]/g, "")
+    .replace(/\s+/g, " ");
 
 const isMemberProfile = (profile: TeamProfile) =>
   profile.role === "agent" || profile.role === "leader" || ["agent", "pre_leader", "leader"].includes(profile.rank ?? "");
@@ -171,12 +310,13 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
   const [selectedDownlineId, setSelectedDownlineId] = useState("all");
   const [selectedCase, setSelectedCase] = useState<SalesCaseRecord | null>(null);
   const [isCaseModalOpen, setIsCaseModalOpen] = useState(false);
+  const [paymentVoucherEntries, setPaymentVoucherEntries] = useState<PaymentVoucherFinanceEntry[]>([]);
 
   useEffect(() => {
     const loadData = async () => {
       setError(null);
 
-      const [profileResult, caseResult, payoutResult, projectResult] = await Promise.all([
+      const [profileResult, caseResult, payoutResult, projectResult, paymentVoucherEntryResult] = await Promise.all([
         supabase
           .from("profiles")
           .select("id, name, email, role, rank, recruit_by, personal_points, group_points, is_active")
@@ -193,6 +333,10 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
             "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, commission_structures, default_commission_structure_id"
           )
           .eq("is_hidden", false),
+        supabase
+          .from("finance_entries")
+          .select("amount, attachment_url, reference_detail")
+          .eq("description", "Payment voucher generated"),
       ]);
 
       if (profileResult.error) {
@@ -215,10 +359,93 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
         return;
       }
 
+      if (paymentVoucherEntryResult.error) {
+        setError(paymentVoucherEntryResult.error.message);
+        return;
+      }
+
+      const basePayouts = (payoutResult.data as SalesCasePayoutRecord[]) ?? [];
+      const payoutById = new Map<string, SalesCasePayoutRecord>();
+      basePayouts.forEach((payout) => payoutById.set(payout.id, payout));
+
+      const paidComponentKeys = new Set<string>();
+      const nextPaymentVoucherEntries = (paymentVoucherEntryResult.data as PaymentVoucherFinanceEntry[]) ?? [];
+
+      nextPaymentVoucherEntries.forEach((entry) => {
+        const meta = parsePaymentVoucherMeta(entry.reference_detail);
+        (meta?.componentKeys ?? []).forEach((key) => {
+          if (key) {
+            paidComponentKeys.add(key);
+          }
+        });
+      });
+
+      const syntheticPaidPayouts: SalesCasePayoutRecord[] = [];
+      const syntheticPaidPayoutIds = new Set<string>();
+
+      paidComponentKeys.forEach((componentKey) => {
+        const payoutIdFromComponent = getPayoutIdFromComponentKey(componentKey) || (payoutById.has(componentKey) ? componentKey : null);
+
+        if (!payoutIdFromComponent) {
+          return;
+        }
+
+        const payout = payoutById.get(payoutIdFromComponent);
+
+        if (!payout || payout.payout_status === "Paid") {
+          return;
+        }
+
+        if (payout.payout_type === "tier_upgrade_top_up") {
+          if (syntheticPaidPayoutIds.has(payout.id)) {
+            return;
+          }
+
+          syntheticPaidPayoutIds.add(payout.id);
+          syntheticPaidPayouts.push({
+            ...payout,
+            id: `${payout.id}:voucher-paid`,
+            payout_status: "Paid",
+            total_amount: Number(Number(payout.total_amount ?? 0).toFixed(2)),
+            paid_at: payout.paid_at,
+          });
+          return;
+        }
+
+        const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+        const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
+
+        if (!matchedSuffix) {
+          return;
+        }
+
+        const payoutId = componentKey.slice(0, -matchedSuffix.length);
+        const standardPayout = payoutById.get(payoutId);
+
+        if (!standardPayout || standardPayout.payout_type !== "standard") {
+          return;
+        }
+
+        const component = getStandardPayoutComponentRows(standardPayout).find((item) => item.key === componentKey);
+
+        if (!component) {
+          return;
+        }
+
+        syntheticPaidPayouts.push({
+          ...standardPayout,
+          id: `${standardPayout.id}:${componentKey}`,
+          payout_status: "Paid",
+          total_amount: Number(component.amount.toFixed(2)),
+          paid_at: standardPayout.paid_at,
+        });
+      });
+
       setProfiles((profileResult.data as TeamProfile[]) ?? []);
       setCases((caseResult.data as SalesCaseRecord[]) ?? []);
-      setPayouts((payoutResult.data as SalesCasePayoutRecord[]) ?? []);
+      setPayouts([...basePayouts, ...syntheticPaidPayouts]);
       setProjects((projectResult.data as ProjectOption[]) ?? []);
+      setPaymentVoucherEntries(nextPaymentVoucherEntries);
     };
 
     loadData();
@@ -330,6 +557,459 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
     [cases, currentProfile, payouts, profiles]
   );
 
+  const voucherPersonalPointsByProfile = useMemo(() => {
+    const map = new Map<string, number>();
+    const linkedPayoutIds = new Set<string>();
+    const payoutById = new Map<string, SalesCasePayoutRecord>();
+    const payoutProfileById = new Map<string, string>();
+    const payoutProfilesByReceiptUrl = new Map<string, Set<string>>();
+    const payoutRowByBaseId = new Map<string, SalesCasePayoutRecord>();
+    const payoutBaseIdsByReceiptUrl = new Map<string, Set<string>>();
+    const profileIdsByLabel = new Map<string, Set<string>>();
+    const componentKeySuffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+
+    profiles.forEach((profile) => {
+      const labels = [normalizeLabel(profile.name), normalizeLabel(profile.email)].filter(Boolean);
+
+      labels.forEach((label) => {
+        const ids = profileIdsByLabel.get(label) ?? new Set<string>();
+        ids.add(profile.id);
+        profileIdsByLabel.set(label, ids);
+      });
+    });
+
+    payouts.forEach((payout) => {
+      if (!payout.id.includes(":")) {
+        payoutById.set(payout.id, payout);
+      }
+
+      const isEligibleVoucherPayout =
+        payout.payout_type === "standard" ||
+        payout.payout_type === "tier_upgrade_top_up" ||
+        isReleasedHoldingPayout(payout);
+
+      if (!isEligibleVoucherPayout) {
+        return;
+      }
+
+      const basePayoutId = payout.id.split(":")[0];
+
+      if (!payoutProfileById.has(basePayoutId)) {
+        payoutProfileById.set(basePayoutId, payout.profile_id);
+      }
+
+      if (!payoutRowByBaseId.has(basePayoutId) && !payout.id.includes(":")) {
+        payoutRowByBaseId.set(basePayoutId, payout);
+      }
+
+      if (!payoutRowByBaseId.has(basePayoutId)) {
+        payoutRowByBaseId.set(basePayoutId, payout);
+      }
+
+      if (payout.payment_receipt_url) {
+        const profileIds = payoutProfilesByReceiptUrl.get(payout.payment_receipt_url) ?? new Set<string>();
+        profileIds.add(payout.profile_id);
+        payoutProfilesByReceiptUrl.set(payout.payment_receipt_url, profileIds);
+
+        const payoutIds = payoutBaseIdsByReceiptUrl.get(payout.payment_receipt_url) ?? new Set<string>();
+        payoutIds.add(basePayoutId);
+        payoutBaseIdsByReceiptUrl.set(payout.payment_receipt_url, payoutIds);
+      }
+    });
+
+    const appendPersonalPoints = (profileId: string, amount: number) => {
+      map.set(profileId, Number(((map.get(profileId) ?? 0) + amount).toFixed(2)));
+    };
+
+    paymentVoucherEntries.forEach((entry) => {
+      const meta = parsePaymentVoucherMeta(entry.reference_detail);
+      const explicitProfileIds = Array.from(new Set((meta?.profileIds ?? []).filter(Boolean)));
+      const memberLabelProfileIds = Array.from(
+        new Set(
+          (meta?.memberLabels ?? [])
+            .flatMap((label) => Array.from(profileIdsByLabel.get(normalizeLabel(label)) ?? new Set<string>()))
+            .filter(Boolean)
+        )
+      );
+      const componentAllocations = new Map<string, number>();
+
+      (meta?.componentKeys ?? []).forEach((componentKey) => {
+        const matchedSuffix = componentKeySuffixes.find((suffix) => componentKey.endsWith(suffix));
+
+        if (matchedSuffix) {
+          const payoutId = componentKey.slice(0, -matchedSuffix.length);
+          const payoutRow = payoutById.get(payoutId);
+
+          if (!payoutRow || payoutRow.payout_type !== "standard") {
+            return;
+          }
+
+          const component = getStandardPayoutComponentRows(payoutRow).find((item) => item.key === componentKey);
+
+          if (!component) {
+            return;
+          }
+
+          const nextAmount = Number(((componentAllocations.get(payoutRow.profile_id) ?? 0) + Number(component.amount ?? 0)).toFixed(2));
+          componentAllocations.set(payoutRow.profile_id, nextAmount);
+            linkedPayoutIds.add(payoutRow.id);
+          return;
+        }
+
+        const payoutId = getPayoutIdFromComponentKey(componentKey) || componentKey;
+        const payoutRow = payoutById.get(payoutId);
+
+        if (!payoutRow) {
+          return;
+        }
+
+        const nextAmount = Number(((componentAllocations.get(payoutRow.profile_id) ?? 0) + Number(payoutRow.total_amount ?? 0)).toFixed(2));
+        componentAllocations.set(payoutRow.profile_id, nextAmount);
+          linkedPayoutIds.add(payoutRow.id);
+      });
+
+      if (componentAllocations.size > 0) {
+        const grossAmount = deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+        const allocatedAmount = Number(
+          Array.from(componentAllocations.values())
+            .reduce((sum, amount) => sum + amount, 0)
+            .toFixed(2)
+        );
+        const scaleRatio = allocatedAmount > 0 ? grossAmount / allocatedAmount : 1;
+
+        Array.from(componentAllocations.entries()).forEach(([profileId, amount], index, list) => {
+          const isLast = index === list.length - 1;
+          const assignedBefore = Number(
+            list
+              .slice(0, index)
+              .reduce((sum, [, previousAmount]) => sum + Number((previousAmount * scaleRatio).toFixed(2)), 0)
+              .toFixed(2)
+          );
+          const scaledAmount = isLast
+            ? Number((grossAmount - assignedBefore).toFixed(2))
+            : Number((amount * scaleRatio).toFixed(2));
+
+          appendPersonalPoints(profileId, scaledAmount);
+        });
+
+        return;
+      }
+
+      const componentPayoutIds = Array.from(
+        new Set(
+          (meta?.componentKeys ?? [])
+            .map((componentKey) => getPayoutIdFromComponentKey(componentKey))
+            .filter((payoutId): payoutId is string => Boolean(payoutId))
+        )
+      );
+
+      if (componentPayoutIds.length > 0) {
+        const payoutAmountByProfile = new Map<string, number>();
+
+        componentPayoutIds.forEach((payoutId) => {
+          const payoutRow = payoutRowByBaseId.get(payoutId);
+
+          if (!payoutRow) {
+            return;
+          }
+
+          const nextAmount = Number(
+            ((payoutAmountByProfile.get(payoutRow.profile_id) ?? 0) + Number(payoutRow.total_amount ?? 0)).toFixed(2)
+          );
+          payoutAmountByProfile.set(payoutRow.profile_id, nextAmount);
+          linkedPayoutIds.add(payoutId);
+        });
+
+        if (payoutAmountByProfile.size > 0) {
+          const preferredProfileIds =
+            explicitProfileIds.length > 0
+              ? explicitProfileIds
+              : memberLabelProfileIds.length > 0
+                ? memberLabelProfileIds
+                : Array.from(payoutAmountByProfile.keys());
+          const filteredEntries = Array.from(payoutAmountByProfile.entries()).filter(([profileId]) =>
+            preferredProfileIds.includes(profileId)
+          );
+          const allocationEntries = filteredEntries.length > 0 ? filteredEntries : Array.from(payoutAmountByProfile.entries());
+          const grossAmount = deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+          const allocatedAmount = Number(
+            allocationEntries
+              .reduce((sum, [, amount]) => sum + amount, 0)
+              .toFixed(2)
+          );
+          const scaleRatio = allocatedAmount > 0 ? grossAmount / allocatedAmount : 1;
+
+          allocationEntries.forEach(([profileId, amount], index, list) => {
+            const isLast = index === list.length - 1;
+            const assignedBefore = Number(
+              list
+                .slice(0, index)
+                .reduce((sum, [, previousAmount]) => sum + Number((previousAmount * scaleRatio).toFixed(2)), 0)
+                .toFixed(2)
+            );
+            const scaledAmount = isLast
+              ? Number((grossAmount - assignedBefore).toFixed(2))
+              : Number((amount * scaleRatio).toFixed(2));
+
+            appendPersonalPoints(profileId, scaledAmount);
+          });
+
+          return;
+        }
+      }
+
+      if (explicitProfileIds.length > 0) {
+        const grossAmount = deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+        const shareAmount = Number((grossAmount / explicitProfileIds.length).toFixed(2));
+
+        explicitProfileIds.forEach((profileId) => {
+          appendPersonalPoints(profileId, shareAmount);
+        });
+
+        return;
+      }
+
+      if (memberLabelProfileIds.length > 0) {
+        const grossAmount = deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+        const shareAmount = Number((grossAmount / memberLabelProfileIds.length).toFixed(2));
+
+        memberLabelProfileIds.forEach((profileId) => {
+          appendPersonalPoints(profileId, shareAmount);
+        });
+
+        return;
+      }
+
+      const receiptPayoutIds = entry.attachment_url
+        ? Array.from(payoutBaseIdsByReceiptUrl.get(entry.attachment_url) ?? new Set<string>())
+        : [];
+
+      if (receiptPayoutIds.length > 0) {
+        const payoutAmountByProfile = new Map<string, number>();
+
+        receiptPayoutIds.forEach((payoutId) => {
+          const payoutRow = payoutRowByBaseId.get(payoutId);
+
+          if (!payoutRow) {
+            return;
+          }
+
+          const nextAmount = Number(
+            ((payoutAmountByProfile.get(payoutRow.profile_id) ?? 0) + Number(payoutRow.total_amount ?? 0)).toFixed(2)
+          );
+          payoutAmountByProfile.set(payoutRow.profile_id, nextAmount);
+          linkedPayoutIds.add(payoutId);
+        });
+
+        if (payoutAmountByProfile.size > 0) {
+          const preferredProfileIds =
+            explicitProfileIds.length > 0
+              ? explicitProfileIds
+              : memberLabelProfileIds.length > 0
+                ? memberLabelProfileIds
+                : Array.from(payoutAmountByProfile.keys());
+          const filteredEntries = Array.from(payoutAmountByProfile.entries()).filter(([profileId]) =>
+            preferredProfileIds.includes(profileId)
+          );
+          const allocationEntries = filteredEntries.length > 0 ? filteredEntries : Array.from(payoutAmountByProfile.entries());
+          const grossAmount = deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+          const allocatedAmount = Number(
+            allocationEntries
+              .reduce((sum, [, amount]) => sum + amount, 0)
+              .toFixed(2)
+          );
+          const scaleRatio = allocatedAmount > 0 ? grossAmount / allocatedAmount : 1;
+
+          allocationEntries.forEach(([profileId, amount], index, list) => {
+            const isLast = index === list.length - 1;
+            const assignedBefore = Number(
+              list
+                .slice(0, index)
+                .reduce((sum, [, previousAmount]) => sum + Number((previousAmount * scaleRatio).toFixed(2)), 0)
+                .toFixed(2)
+            );
+            const scaledAmount = isLast
+              ? Number((grossAmount - assignedBefore).toFixed(2))
+              : Number((amount * scaleRatio).toFixed(2));
+
+            appendPersonalPoints(profileId, scaledAmount);
+          });
+        }
+
+        return;
+      }
+
+      const profileIds = new Set<string>((meta?.profileIds ?? []).filter(Boolean));
+
+      if (profileIds.size === 0) {
+        (meta?.componentKeys ?? []).forEach((componentKey) => {
+          const payoutId = getPayoutIdFromComponentKey(componentKey);
+          const profileId = payoutId ? payoutProfileById.get(payoutId) : null;
+
+          if (profileId) {
+            profileIds.add(profileId);
+          }
+        });
+      }
+
+      if (profileIds.size === 0 && entry.attachment_url) {
+        (payoutProfilesByReceiptUrl.get(entry.attachment_url) ?? new Set<string>()).forEach((profileId) => {
+          if (profileId) {
+            profileIds.add(profileId);
+          }
+        });
+      }
+
+      if (profileIds.size === 0) {
+        (meta?.memberLabels ?? []).forEach((label) => {
+          const normalizedLabel = normalizeLabel(label);
+
+          if (!normalizedLabel) {
+            return;
+          }
+
+          (profileIdsByLabel.get(normalizedLabel) ?? new Set<string>()).forEach((profileId) => {
+            if (profileId) {
+              profileIds.add(profileId);
+            }
+          });
+        });
+      }
+
+      const resolvedProfileIds = Array.from(profileIds);
+
+      if (resolvedProfileIds.length === 0) {
+        return;
+      }
+
+      const grossAmount = deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+      const shareAmount = Number((grossAmount / resolvedProfileIds.length).toFixed(2));
+
+      resolvedProfileIds.forEach((profileId) => {
+        appendPersonalPoints(profileId, shareAmount);
+      });
+    });
+
+      payouts
+        .filter((payout) => !payout.id.includes(":"))
+        .filter((payout) => payout.payout_type === "tier_upgrade_top_up")
+        .filter((payout) => payout.payout_status === "Paid")
+        .filter((payout) => Boolean(payout.payment_receipt_url))
+        .forEach((payout) => {
+          if (linkedPayoutIds.has(payout.id)) {
+            return;
+          }
+
+          appendPersonalPoints(payout.profile_id, Number(Number(payout.total_amount ?? 0).toFixed(2)));
+        });
+
+    return map;
+  }, [paymentVoucherEntries, payouts, profiles]);
+
+  const voucherGroupPointsByProfile = useMemo(() => {
+    const map = new Map<string, number>();
+    const profileById = new Map<string, TeamProfile>();
+
+    profiles.forEach((profile) => {
+      profileById.set(profile.id, profile);
+    });
+
+    const addGroupPoints = (profileId: string, amount: number) => {
+      map.set(profileId, Number(((map.get(profileId) ?? 0) + amount).toFixed(2)));
+    };
+
+    const getProgressRank = (profile: TeamProfile) => {
+      if (profile.rank === "agent" || profile.rank === "pre_leader" || profile.rank === "leader") {
+        return profile.rank;
+      }
+
+      if (profile.role === "leader") {
+        return "leader";
+      }
+
+      if (profile.role === "agent") {
+        return "agent";
+      }
+
+      return null;
+    };
+
+    voucherPersonalPointsByProfile.forEach((amount, sourceProfileId) => {
+      const sourceProfile = profileById.get(sourceProfileId);
+
+      if (!sourceProfile || amount <= 0) {
+        return;
+      }
+
+      const sourceRank = getProgressRank(sourceProfile);
+
+      if (sourceRank !== "agent" && sourceRank !== "pre_leader" && sourceRank !== "leader") {
+        return;
+      }
+
+      if (sourceRank === "agent") {
+        let currentRecruiterId = sourceProfile.recruit_by;
+        const visited = new Set<string>();
+        let assignedPreLeader = false;
+        let assignedLeader = false;
+
+        while (currentRecruiterId && !visited.has(currentRecruiterId)) {
+          visited.add(currentRecruiterId);
+
+          const recruiter = profileById.get(currentRecruiterId);
+
+          if (!recruiter) {
+            break;
+          }
+
+          const recruiterRank = getProgressRank(recruiter);
+
+          if (recruiterRank === "pre_leader" && !assignedPreLeader) {
+            addGroupPoints(recruiter.id, amount);
+            assignedPreLeader = true;
+          }
+
+          if (recruiterRank === "leader" && !assignedLeader) {
+            addGroupPoints(recruiter.id, amount);
+            assignedLeader = true;
+          }
+
+          if (assignedPreLeader && assignedLeader) {
+            break;
+          }
+
+          currentRecruiterId = recruiter.recruit_by;
+        }
+      }
+
+      if (sourceRank === "pre_leader" || sourceRank === "leader") {
+        addGroupPoints(sourceProfile.id, amount);
+
+        let currentRecruiterId = sourceProfile.recruit_by;
+        const visited = new Set<string>();
+
+        while (currentRecruiterId && !visited.has(currentRecruiterId)) {
+          visited.add(currentRecruiterId);
+
+          const recruiter = profileById.get(currentRecruiterId);
+
+          if (!recruiter) {
+            break;
+          }
+
+          if (getProgressRank(recruiter) === "leader") {
+            addGroupPoints(recruiter.id, amount);
+            break;
+          }
+
+          currentRecruiterId = recruiter.recruit_by;
+        }
+      }
+    });
+
+    return map;
+  }, [profiles, voucherPersonalPointsByProfile]);
+
   const teamCaseRows = useMemo<TeamCaseRow[]>(() => {
     const downlineIdSet = new Set(downlineIds);
 
@@ -339,11 +1019,14 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
         return relatedIds.some((profileId) => downlineIdSet.has(profileId));
       })
       .map((record) => {
-        const relatedPayouts = (payoutMap.get(record.id) ?? []).filter(
-          (payout) => payout.payout_type !== "tier_upgrade_top_up"
+        const allRelatedPayouts = payoutMap.get(record.id) ?? [];
+        const relatedPayouts = allRelatedPayouts.filter(
+          (payout) => payout.payout_type !== "tier_upgrade_top_up" || isReleasedHoldingPayout(payout)
         );
+        const standardRelatedPayouts = relatedPayouts.filter((payout) => payout.payout_type !== "tier_upgrade_top_up");
+        const releasedHoldingPayouts = relatedPayouts.filter((payout) => isReleasedHoldingPayout(payout));
         const displayStatus =
-          relatedPayouts.length > 0 && relatedPayouts.every((payout) => payout.payout_status === "Paid")
+          standardRelatedPayouts.length > 0 && standardRelatedPayouts.every((payout) => payout.payout_status === "Paid")
             ? "Completed"
             : normalizeCaseStatus(record.status);
         const memberIds = Array.from(
@@ -365,12 +1048,24 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
           record.project_id ? projectMap.get(record.project_id) ?? null : null,
           profiles,
           downlineIdSet
+        ) + releasedHoldingPayouts.reduce(
+          (sum, payout) => (downlineIdSet.has(payout.profile_id) ? sum + Number(payout.total_amount ?? 0) : sum),
+          0
         );
         const personalGdv = getCasePersonalAmountForProfiles(record, record.spa_price ?? 0, downlineIdSet);
         const personalSalesConverted = displayStatus === "Completed"
           ? getCasePersonalAmountForProfiles(record, record.nett_price ?? 0, downlineIdSet)
           : 0;
-        const completedCommission = getCompletedCommissionAmountForProfiles(relatedPayouts, downlineIdSet);
+        const completedCommission =
+          getCompletedCommissionAmountForProfiles(relatedPayouts, downlineIdSet) +
+          allRelatedPayouts
+            .filter(
+              (payout) =>
+                payout.payout_type === "tier_upgrade_top_up" &&
+                payout.payout_status === "Paid" &&
+                downlineIdSet.has(payout.profile_id)
+            )
+            .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
 
         return {
           id: record.id,
@@ -408,11 +1103,14 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
         return relatedIds.some((profileId) => teamIdSet.has(profileId));
       })
       .map((record) => {
-        const relatedPayouts = (payoutMap.get(record.id) ?? []).filter(
-          (payout) => payout.payout_type !== "tier_upgrade_top_up"
+        const allRelatedPayouts = payoutMap.get(record.id) ?? [];
+        const relatedPayouts = allRelatedPayouts.filter(
+          (payout) => payout.payout_type !== "tier_upgrade_top_up" || isReleasedHoldingPayout(payout)
         );
+        const standardRelatedPayouts = relatedPayouts.filter((payout) => payout.payout_type !== "tier_upgrade_top_up");
+        const releasedHoldingPayouts = relatedPayouts.filter((payout) => isReleasedHoldingPayout(payout));
         const displayStatus =
-          relatedPayouts.length > 0 && relatedPayouts.every((payout) => payout.payout_status === "Paid")
+          standardRelatedPayouts.length > 0 && standardRelatedPayouts.every((payout) => payout.payout_status === "Paid")
             ? "Completed"
             : normalizeCaseStatus(record.status);
         const memberIds = Array.from(
@@ -434,12 +1132,24 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
           record.project_id ? projectMap.get(record.project_id) ?? null : null,
           profiles,
           teamIdSet
+        ) + releasedHoldingPayouts.reduce(
+          (sum, payout) => (teamIdSet.has(payout.profile_id) ? sum + Number(payout.total_amount ?? 0) : sum),
+          0
         );
         const personalGdv = getCasePersonalAmountForProfiles(record, record.spa_price ?? 0, teamIdSet);
         const personalSalesConverted = displayStatus === "Completed"
           ? getCasePersonalAmountForProfiles(record, record.nett_price ?? 0, teamIdSet)
           : 0;
-        const completedCommission = getCompletedCommissionAmountForProfiles(relatedPayouts, teamIdSet);
+        const completedCommission =
+          getCompletedCommissionAmountForProfiles(relatedPayouts, teamIdSet) +
+          allRelatedPayouts
+            .filter(
+              (payout) =>
+                payout.payout_type === "tier_upgrade_top_up" &&
+                payout.payout_status === "Paid" &&
+                teamIdSet.has(payout.profile_id)
+            )
+            .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
 
         return {
           id: record.id,
@@ -554,8 +1264,41 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
   }, [selectedMonth, selectedProjectId, statusFilter, summaryCaseRows]);
 
   const totalDownlineSales = useMemo(
-    () => filteredSummaryCaseRows.reduce((sum, row) => sum + row.totalCommission, 0),
-    [filteredSummaryCaseRows]
+    () => {
+      const baseSales = filteredSummaryCaseRows.reduce((sum, row) => sum + row.totalCommission, 0);
+      const teamIdSet = new Set([userId, ...downlineIds]);
+
+      const topUpSales = payouts
+        .filter((payout) => payout.payout_type === "tier_upgrade_top_up")
+        .filter((payout) => !isReleasedHoldingPayout(payout))
+        .filter((payout) => teamIdSet.has(payout.profile_id))
+        .reduce((sum, payout) => {
+          const relatedCase = cases.find((record) => record.id === payout.sales_case_id) ?? null;
+
+          if (!relatedCase) {
+            return sum;
+          }
+
+          if (selectedMonth && getDateMonthValue(new Date(payout.created_at)) !== selectedMonth) {
+            return sum;
+          }
+
+          if (selectedProjectId !== "all" && relatedCase.project_id !== selectedProjectId) {
+            return sum;
+          }
+
+          const payoutDisplayStatus = payout.payout_status === "Paid" ? "Completed" : payout.payout_status;
+
+          if (statusFilter !== "all" && payoutDisplayStatus !== statusFilter) {
+            return sum;
+          }
+
+          return sum + Number(payout.total_amount ?? 0);
+        }, 0);
+
+      return baseSales + topUpSales;
+    },
+    [cases, downlineIds, filteredSummaryCaseRows, payouts, selectedMonth, selectedProjectId, statusFilter, userId]
   );
 
   const totalDownlineConverted = useMemo(
@@ -621,9 +1364,9 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
               </p>
               {getNextRankTarget(currentProfileSummary.rank).requirements.map((requirement) => {
                 const currentValue = requirement.key === "personal"
-                  ? currentProfileSummary.personalPoints
+                  ? currentProfileSummary.personalPoints + (voucherPersonalPointsByProfile.get(currentProfile.id) ?? 0)
                   : requirement.key === "group"
-                    ? currentProfileSummary.groupPoints
+                    ? currentProfileSummary.groupPoints + (voucherGroupPointsByProfile.get(currentProfile.id) ?? 0)
                     : currentProfileSummary.directRecruitCount;
                 const progress = Math.min((currentValue / requirement.target) * 100, 100);
 
@@ -775,9 +1518,9 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
                     </p>
                     {target.requirements.map((requirement) => {
                       const currentValue = requirement.key === "personal"
-                        ? summary?.personalPoints ?? 0
+                        ? (summary?.personalPoints ?? 0) + (voucherPersonalPointsByProfile.get(profile.id) ?? 0)
                         : requirement.key === "group"
-                          ? summary?.groupPoints ?? 0
+                          ? (summary?.groupPoints ?? 0) + (voucherGroupPointsByProfile.get(profile.id) ?? 0)
                           : summary?.directRecruitCount ?? 0;
                       const progress = Math.min((currentValue / requirement.target) * 100, 100);
 

@@ -1,12 +1,30 @@
 alter table public.sales_cases
   add column if not exists booking_date date default current_date,
   add column if not exists customer_contact_number text,
+  add column if not exists customer_address text,
+  add column if not exists emergency_contact_name text,
+  add column if not exists emergency_contact_relationship text,
+  add column if not exists emergency_contact_ic_passport text,
+  add column if not exists emergency_contact_number text,
+  add column if not exists emergency_contact_email text,
   add column if not exists involved_profile_id uuid,
   add column if not exists status text not null default 'Pending',
   add column if not exists lo_draft_url text,
+  add column if not exists signed_lo_date date,
   add column if not exists commission_structure jsonb,
   add column if not exists commission_review_sent_at timestamptz,
   add column if not exists commission_review_sent_by uuid;
+
+alter table public.projects
+  add column if not exists direct_commission numeric,
+  add column if not exists holding_commission numeric;
+
+update public.projects
+set
+  direct_commission = coalesce(direct_commission, company_commission + agent_commission + pre_leader_override + leader_override),
+  holding_commission = coalesce(holding_commission, 0)
+where direct_commission is null
+   or holding_commission is null;
 
 create table if not exists public.sales_case_payouts (
   id uuid primary key default gen_random_uuid(),
@@ -638,6 +656,7 @@ returns table (
   buyer_type text,
   booking_form_url text,
   lo_draft_url text,
+  signed_lo_date date,
   commission_structure jsonb,
   status text,
   created_by uuid,
@@ -674,6 +693,7 @@ as $$
     sales_cases.buyer_type,
     sales_cases.booking_form_url,
     sales_cases.lo_draft_url,
+    sales_cases.signed_lo_date,
     sales_cases.commission_structure,
     sales_cases.status,
     sales_cases.created_by,
