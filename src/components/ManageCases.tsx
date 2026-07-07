@@ -244,6 +244,14 @@ export function ManageCases({ userId }: ManageCasesProps) {
       }, 0),
     [memberProfileIds, profiles, projectMap, summaryCases]
   );
+  
+  const totalHoldingComm = useMemo(
+    () =>
+      summaryCases.reduce((sum, record) => {
+        return sum + (record.holding_amount ?? 0);
+      }, 0),
+    [summaryCases]
+  );
 
   const totalMonthlyConverted = useMemo(
     () => {
@@ -607,7 +615,12 @@ export function ManageCases({ userId }: ManageCasesProps) {
         </div>
         <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm">
           <p className="text-sm font-medium text-gray-500 mb-2">Total Sales</p>
-          <p className="text-2xl font-bold text-gray-900">RM {formatAmount(totalMonthlySales)}</p>
+          <div className="flex flex-col gap-1">
+            <p className="text-2xl font-bold text-gray-900">RM {formatAmount(totalMonthlySales)}</p>
+            <p className="text-sm font-medium text-gray-500">
+               + Holding Comm: RM {formatAmount(totalHoldingComm)}
+            </p>
+          </div>
         </div>
         <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm">
           <p className="text-sm font-medium text-gray-500 mb-2">Total Converted</p>
