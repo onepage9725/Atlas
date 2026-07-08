@@ -3,7 +3,6 @@ import { Pencil, Plus, Send } from "lucide-react";
 import { notifyCaseAudience } from "../lib/notifications";
 import { supabase } from "../lib/supabaseClient";
 import {
-  getCaseCommissionAmountForProfiles,
   getCompletedCommissionAmountForProfiles,
 } from "../lib/salesCaseMetrics";
 import {
@@ -31,6 +30,63 @@ type ProfileOption = {
   recruit_by: string | null;
 };
 
+type FinanceVoucherEntry = {
+  id: string;
+  amount: number;
+  reference_detail: string | null;
+  transacted_at: string | null;
+  created_at: string;
+};
+
+type VoucherHistoryMeta = {
+  grossAmount?: number;
+  payoutIds?: string[];
+  componentKeys?: string[];
+  salesCaseIds?: string[];
+};
+
+const HISTORY_META_SEPARATOR = "|||META|||";
+
+const parseVoucherHistoryMeta = (referenceDetail: string | null | undefined) => {
+  if (!referenceDetail || !referenceDetail.includes(HISTORY_META_SEPARATOR)) {
+    return null;
+  }
+
+  const [, metaPayload] = referenceDetail.split(HISTORY_META_SEPARATOR);
+
+  if (!metaPayload) {
+    return null;
+  }
+
+  try {
+    const [metaJson] = metaPayload.split(" | ");
+    return JSON.parse(metaJson) as VoucherHistoryMeta;
+  } catch {
+    return null;
+  }
+};
+
+const getPayoutIdFromComponentKey = (componentKey: string) => {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(componentKey)) {
+    return componentKey;
+  }
+
+  const uuidPrefixMatch = componentKey.match(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-/);
+
+  if (uuidPrefixMatch?.[1]) {
+    return uuidPrefixMatch[1];
+  }
+
+  const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+  const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
+
+  if (!matchedSuffix) {
+    return null;
+  }
+
+  return componentKey.slice(0, -matchedSuffix.length);
+};
+
 const MONTH_OPTIONS = [
   { value: "all", label: "All time" },
   { value: "01", label: "Jan" },
@@ -53,9 +109,9 @@ type ManageCasesProps = {
 
 const formatAmount = (value: number | null) => {
   if (value === null || Number.isNaN(value)) return "-";
-  const hasDecimals = Math.round(value) !== value;
-  return value.toLocaleString("en-MY", {
-    minimumFractionDigits: hasDecimals ? 2 : 0,
+  const roundedValue = Math.round(value * 100) / 100;
+  return roundedValue.toLocaleString("en-MY", {
+    minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });
 };
@@ -66,6 +122,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [payouts, setPayouts] = useState<SalesCasePayoutRecord[]>([]);
+  const [voucherEntries, setVoucherEntries] = useState<FinanceVoucherEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -239,23 +296,22 @@ export function ManageCases({ userId }: ManageCasesProps) {
     () =>
       summaryCases.reduce((sum, record) => {
         const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
+        const commissionStructure = getCaseCommissionStructure(record, project);
+        const totalCommissionPercentage =
+          (commissionStructure?.agent_commission ?? 0) +
+          (commissionStructure?.pre_leader_override ?? 0) +
+          (commissionStructure?.leader_override ?? 0);
+        const totalCommissionAmount = (record.nett_price ?? 0) * (totalCommissionPercentage / 100);
 
-        return sum + getCaseCommissionAmountForProfiles(record, project, profiles, memberProfileIds);
+        return sum + totalCommissionAmount;
       }, 0),
-    [memberProfileIds, profiles, projectMap, summaryCases]
-  );
-  
-  const totalHoldingComm = useMemo(
-    () =>
-      summaryCases.reduce((sum, record) => {
-        return sum + (record.holding_amount ?? 0);
-      }, 0),
-    [summaryCases]
+    [projectMap, summaryCases]
   );
 
   const totalMonthlyConverted = useMemo(
     () => {
       const summaryCaseIds = new Set(summaryCases.map((record) => record.id));
+      const payoutById = new Map(payouts.map((payout) => [payout.id, payout]));
 
       const convertedDirect = summaryCases.reduce(
         (sum, record) => sum + getCompletedCommissionAmountForProfiles(payoutMap.get(record.id) ?? [], memberProfileIds),
@@ -272,9 +328,65 @@ export function ManageCases({ userId }: ManageCasesProps) {
         )
         .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
 
-      return convertedDirect + convertedTopUp;
+      const convertedVoucher = voucherEntries.reduce((sum, entry) => {
+        const meta = parseVoucherHistoryMeta(entry.reference_detail);
+
+        if (!meta) {
+          return sum;
+        }
+
+        const relatedCaseIds = new Set<string>((meta.salesCaseIds ?? []).filter(Boolean));
+        const linkedPayoutIds = new Set<string>((meta.payoutIds ?? []).filter(Boolean));
+
+        (meta.componentKeys ?? []).forEach((componentKey) => {
+          const payoutId = getPayoutIdFromComponentKey(componentKey);
+
+          if (!payoutId) {
+            return;
+          }
+
+          linkedPayoutIds.add(payoutId);
+          const payout = payoutById.get(payoutId);
+
+          if (payout?.sales_case_id) {
+            relatedCaseIds.add(payout.sales_case_id);
+          }
+        });
+
+        linkedPayoutIds.forEach((payoutId) => {
+          const payout = payoutById.get(payoutId);
+
+          if (payout?.sales_case_id) {
+            relatedCaseIds.add(payout.sales_case_id);
+          }
+        });
+
+        const hasScopedCase = Array.from(relatedCaseIds).some((caseId) => summaryCaseIds.has(caseId));
+
+        if (!hasScopedCase) {
+          return sum;
+        }
+
+        const hasUnpaidLinkedPayout =
+          linkedPayoutIds.size === 0 ||
+          Array.from(linkedPayoutIds).some((payoutId) => payoutById.get(payoutId)?.payout_status !== "Paid");
+
+        if (!hasUnpaidLinkedPayout) {
+          return sum;
+        }
+
+        const grossAmount = Number(meta.grossAmount ?? entry.amount ?? 0);
+
+        if (!Number.isFinite(grossAmount)) {
+          return sum;
+        }
+
+        return sum + grossAmount;
+      }, 0);
+
+      return convertedDirect + convertedTopUp + convertedVoucher;
     },
-    [memberProfileIds, payoutMap, payouts, summaryCases]
+    [memberProfileIds, payoutMap, payouts, summaryCases, voucherEntries]
   );
 
   const totalMonthlyCaseCount = useMemo(() => summaryCases.length, [summaryCases]);
@@ -362,10 +474,26 @@ export function ManageCases({ userId }: ManageCasesProps) {
     setProfiles((data as ProfileOption[]) ?? []);
   };
 
+  const fetchVoucherEntries = async () => {
+    const { data, error: fetchError } = await supabase
+      .from("finance_entries")
+      .select("id, amount, reference_detail, transacted_at, created_at")
+      .eq("description", "Payment voucher generated")
+      .order("created_at", { ascending: false });
+
+    if (fetchError) {
+      setError(fetchError.message);
+      return;
+    }
+
+    setVoucherEntries((data as FinanceVoucherEntry[]) ?? []);
+  };
+
   useEffect(() => {
     const loadData = async () => {
       await fetchCases();
       await fetchPayouts();
+      await fetchVoucherEntries();
     };
 
     loadData();
@@ -615,12 +743,7 @@ export function ManageCases({ userId }: ManageCasesProps) {
         </div>
         <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm">
           <p className="text-sm font-medium text-gray-500 mb-2">Total Sales</p>
-          <div className="flex flex-col gap-1">
-            <p className="text-2xl font-bold text-gray-900">RM {formatAmount(totalMonthlySales)}</p>
-            <p className="text-sm font-medium text-gray-500">
-               + Holding Comm: RM {formatAmount(totalHoldingComm)}
-            </p>
-          </div>
+          <p className="text-2xl font-bold text-gray-900">RM {formatAmount(totalMonthlySales)}</p>
         </div>
         <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm">
           <p className="text-sm font-medium text-gray-500 mb-2">Total Converted</p>

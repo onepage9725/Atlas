@@ -360,6 +360,33 @@ using (
   )
 );
 
+drop policy if exists finance_entries_select_related_member on public.finance_entries;
+create policy finance_entries_select_related_member
+on public.finance_entries
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.sales_case_payouts
+    where sales_case_payouts.profile_id = auth.uid()
+      and (
+        (
+          finance_entries.attachment_url is not null
+          and sales_case_payouts.payment_receipt_url = finance_entries.attachment_url
+        )
+        or (
+          finance_entries.reference_detail is not null
+          and finance_entries.reference_detail ilike ('%' || sales_case_payouts.id::text || '%')
+        )
+        or (
+          finance_entries.reference_detail is not null
+          and finance_entries.reference_detail ilike ('%' || auth.uid()::text || '%')
+        )
+      )
+  )
+);
+
 drop policy if exists finance_entries_insert_admin on public.finance_entries;
 create policy finance_entries_insert_admin
 on public.finance_entries

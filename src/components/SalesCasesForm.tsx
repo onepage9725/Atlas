@@ -29,6 +29,64 @@ type ProfileOption = {
   recruit_by: string | null;
 };
 
+type FinanceVoucherEntry = {
+  id: string;
+  amount: number;
+  reference_detail: string | null;
+  transacted_at: string | null;
+  created_at: string;
+};
+
+type VoucherHistoryMeta = {
+  grossAmount?: number;
+  payoutIds?: string[];
+  componentKeys?: string[];
+  salesCaseIds?: string[];
+  profileIds?: string[];
+};
+
+const HISTORY_META_SEPARATOR = "|||META|||";
+
+const parseVoucherHistoryMeta = (referenceDetail: string | null | undefined) => {
+  if (!referenceDetail || !referenceDetail.includes(HISTORY_META_SEPARATOR)) {
+    return null;
+  }
+
+  const [, metaPayload] = referenceDetail.split(HISTORY_META_SEPARATOR);
+
+  if (!metaPayload) {
+    return null;
+  }
+
+  try {
+    const [metaJson] = metaPayload.split(" | ");
+    return JSON.parse(metaJson) as VoucherHistoryMeta;
+  } catch {
+    return null;
+  }
+};
+
+const getPayoutIdFromComponentKey = (componentKey: string) => {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(componentKey)) {
+    return componentKey;
+  }
+
+  const uuidPrefixMatch = componentKey.match(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-/);
+
+  if (uuidPrefixMatch?.[1]) {
+    return uuidPrefixMatch[1];
+  }
+
+  const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+  const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
+
+  if (!matchedSuffix) {
+    return null;
+  }
+
+  return componentKey.slice(0, -matchedSuffix.length);
+};
+
 type SalesCasesFormProps = {
   userId: string;
 };
@@ -73,6 +131,7 @@ type DisplaySalesCaseRow = {
   status: string;
   isLocked: boolean;
   viewerCommission: number | null;
+  viewerAgentCommission: number | null;
   viewerPayout: SalesCasePayoutRecord | null;
   displayStatus: string;
   displayCommission: number | null;
@@ -144,6 +203,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [payouts, setPayouts] = useState<SalesCasePayoutRecord[]>([]);
+  const [voucherEntries, setVoucherEntries] = useState<FinanceVoucherEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -423,6 +483,21 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
     setPayouts((data as SalesCasePayoutRecord[]) ?? []);
   };
 
+  const fetchVoucherEntries = async () => {
+    const { data, error: fetchError } = await supabase
+      .from("finance_entries")
+      .select("id, amount, reference_detail, transacted_at, created_at")
+      .eq("description", "Payment voucher generated")
+      .order("created_at", { ascending: false });
+
+    if (fetchError) {
+      setError(fetchError.message);
+      return;
+    }
+
+    setVoucherEntries((data as FinanceVoucherEntry[]) ?? []);
+  };
+
   const fetchProjects = async () => {
     const { data, error: fetchError } = await supabase
       .from("projects")
@@ -484,6 +559,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
     fetchCases();
     fetchProjects();
     fetchPayouts();
+    fetchVoucherEntries();
   }, [userId]);
 
   useEffect(() => {
@@ -538,7 +614,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
     return { preLeader: null, leader: null };
   };
 
-  const getViewerCommission = (record: SalesCaseRecord) => {
+  const getViewerCommissionBreakdown = (record: SalesCaseRecord) => {
     const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
     const commissionStructure = getCaseCommissionStructure(record, project);
     const directPercentage = getDirectCommissionPercentage(commissionStructure);
@@ -564,7 +640,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
       : null;
 
     if (!project || !viewerProfile || !commissionStructure || !directCommissionStructure) {
-      return null;
+      return { totalAmount: 0, agentAmount: 0 };
     }
 
     const participantIds = Array.from(
@@ -577,19 +653,21 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
     );
 
     if (participantIds.length === 0) {
-      return null;
+      return { totalAmount: 0, agentAmount: 0 };
     }
 
     const splitAgentPercentage = (directCommissionStructure.agent_commission ?? 0) / participantIds.length;
     const splitPreLeaderPercentage = (directCommissionStructure.pre_leader_override ?? 0) / participantIds.length;
     const splitLeaderPercentage = (directCommissionStructure.leader_override ?? 0) / participantIds.length;
     let totalPercentage = 0;
+    let agentPercentage = 0;
 
     participants.forEach((participant) => {
       const chain = getLeaderChain(participant);
 
       if (participant.id === userId) {
         totalPercentage += splitAgentPercentage;
+        agentPercentage += splitAgentPercentage;
       }
 
       if (participant.rank === "agent") {
@@ -618,7 +696,10 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
       }
     });
 
-    return (record.nett_price ?? 0) * (totalPercentage / 100);
+    return {
+      totalAmount: (record.nett_price ?? 0) * (totalPercentage / 100),
+      agentAmount: (record.nett_price ?? 0) * (agentPercentage / 100),
+    };
   };
 
   const displaySalesCaseRows = useMemo<DisplaySalesCaseRow[]>(() => {
@@ -637,7 +718,8 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
       const bookingDate = record.booking_date ? new Date(record.booking_date) : null;
       const status = normalizeCaseStatus(record.status);
       const isLocked = isCaseLockedForEditing(record.status);
-      const viewerCommission = getViewerCommission(record);
+      const viewerCommissionBreakdown = getViewerCommissionBreakdown(record);
+      const viewerCommission = viewerCommissionBreakdown.totalAmount;
       const relatedPayouts = (payoutMap.get(record.id) ?? []).filter(
         (payout) => payout.payout_type !== "tier_upgrade_top_up"
       );
@@ -675,6 +757,7 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
         status,
         isLocked,
         viewerCommission,
+        viewerAgentCommission: viewerCommissionBreakdown.agentAmount,
         viewerPayout,
         displayStatus,
         displayCommission,
@@ -752,12 +835,85 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
   );
 
   const totalMonthlyConverted = useMemo(
-    () =>
-      selectedMonthRows.reduce(
+    () => {
+      const convertedFromRows = selectedMonthRows.reduce(
         (sum, item) => sum + (item.displayStatus === "Completed" ? item.displayCommission ?? 0 : 0),
         0
-      ),
-    [selectedMonthRows]
+      );
+      const scopedCaseIds = new Set(selectedMonthBaseRows.map((item) => item.row.record.id));
+      const payoutById = new Map(payouts.map((payout) => [payout.id, payout]));
+      const userPayoutIds = new Set(
+        payouts
+          .filter((payout) => payout.profile_id === userId)
+          .map((payout) => payout.id)
+      );
+
+      const convertedFromVouchers = voucherEntries.reduce((sum, entry) => {
+        const meta = parseVoucherHistoryMeta(entry.reference_detail);
+
+        if (!meta) {
+          return sum;
+        }
+
+        const hasProfileMatch = (meta.profileIds ?? []).includes(userId);
+        const relatedCaseIds = new Set<string>((meta.salesCaseIds ?? []).filter(Boolean));
+        const linkedPayoutIds = new Set<string>((meta.payoutIds ?? []).filter(Boolean));
+
+        (meta.componentKeys ?? []).forEach((componentKey) => {
+          const payoutId = getPayoutIdFromComponentKey(componentKey);
+
+          if (!payoutId) {
+            return;
+          }
+
+          linkedPayoutIds.add(payoutId);
+          const payout = payoutById.get(payoutId);
+
+          if (payout?.sales_case_id) {
+            relatedCaseIds.add(payout.sales_case_id);
+          }
+        });
+
+        linkedPayoutIds.forEach((payoutId) => {
+          const payout = payoutById.get(payoutId);
+
+          if (payout?.sales_case_id) {
+            relatedCaseIds.add(payout.sales_case_id);
+          }
+        });
+
+        const hasPayoutMatch = Array.from(linkedPayoutIds).some((payoutId) => userPayoutIds.has(payoutId));
+
+        if (!hasProfileMatch && !hasPayoutMatch) {
+          return sum;
+        }
+
+        const hasScopedCase = Array.from(relatedCaseIds).some((caseId) => scopedCaseIds.has(caseId));
+
+        if (!hasScopedCase) {
+          return sum;
+        }
+
+        const hasUnpaidLinkedPayout =
+          linkedPayoutIds.size === 0 ||
+          Array.from(linkedPayoutIds).some((payoutId) => payoutById.get(payoutId)?.payout_status !== "Paid");
+
+        if (!hasUnpaidLinkedPayout) {
+          return sum;
+        }
+
+        const grossAmount = Number(meta.grossAmount ?? entry.amount ?? 0);
+
+        if (!Number.isFinite(grossAmount)) {
+          return sum;
+        }
+
+        return sum + grossAmount;
+      }, 0);
+
+      return convertedFromRows + convertedFromVouchers;
+    },
+    [payouts, selectedMonthBaseRows, selectedMonthRows, userId, voucherEntries]
   );
 
   const totalMonthlySales = useMemo(
@@ -768,6 +924,10 @@ export function SalesCasesForm({ userId }: SalesCasesFormProps) {
   const totalMonthlyCaseCount = useMemo(
     () =>
       selectedMonthBaseRows.reduce((sum, item) => {
+        if ((item.viewerAgentCommission ?? 0) <= 0) {
+          return sum;
+        }
+
         const hasInvolvedSalesperson = Boolean(getStoredInvolvedProfileId(item.row.record));
         return sum + (hasInvolvedSalesperson ? 0.5 : 1);
       }, 0),

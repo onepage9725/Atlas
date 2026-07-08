@@ -45,6 +45,8 @@ type FinanceEntryRecord = {
 
 type VoucherHistoryMeta = {
   payoutIds?: string[];
+  componentKeys?: string[];
+  salesCaseIds?: string[];
   grossAmount?: number;
 };
 
@@ -112,6 +114,27 @@ const parseVoucherHistoryMeta = (referenceDetail: string | null | undefined) => 
   } catch {
     return null;
   }
+};
+
+const getPayoutIdFromComponentKey = (componentKey: string) => {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(componentKey)) {
+    return componentKey;
+  }
+
+  const uuidPrefixMatch = componentKey.match(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-/);
+
+  if (uuidPrefixMatch?.[1]) {
+    return uuidPrefixMatch[1];
+  }
+
+  const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+  const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
+
+  if (!matchedSuffix) {
+    return null;
+  }
+
+  return componentKey.slice(0, -matchedSuffix.length);
 };
 
 const isReleasedHoldingTopUp = (payout: SalesCasePayoutRecord) => {
@@ -669,6 +692,7 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
   const totalMonthlyConvertedCommission = useMemo(
     () => {
       const filteredCaseIds = new Set(filteredCaseRows.map((record) => record.id));
+      const payoutById = new Map(payouts.map((payout) => [payout.id, payout]));
 
       const convertedDirect = filteredCaseRows.reduce(
         (sum, record) => sum + getCompletedCommissionAmountForProfiles(payoutMap.get(record.id) ?? [], memberProfileIds),
@@ -685,9 +709,69 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
         )
         .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
 
-      return convertedDirect + convertedTopUp;
+      const convertedVoucher = entries.reduce((sum, entry) => {
+        if (entry.description !== "Payment voucher generated") {
+          return sum;
+        }
+
+        const meta = parseVoucherHistoryMeta(entry.reference_detail);
+
+        if (!meta) {
+          return sum;
+        }
+
+        const relatedCaseIds = new Set<string>((meta.salesCaseIds ?? []).filter(Boolean));
+        const linkedPayoutIds = new Set<string>((meta.payoutIds ?? []).filter(Boolean));
+
+        (meta.componentKeys ?? []).forEach((componentKey) => {
+          const payoutId = getPayoutIdFromComponentKey(componentKey);
+
+          if (!payoutId) {
+            return;
+          }
+
+          linkedPayoutIds.add(payoutId);
+          const payout = payoutById.get(payoutId);
+
+          if (payout?.sales_case_id) {
+            relatedCaseIds.add(payout.sales_case_id);
+          }
+        });
+
+        linkedPayoutIds.forEach((payoutId) => {
+          const payout = payoutById.get(payoutId);
+
+          if (payout?.sales_case_id) {
+            relatedCaseIds.add(payout.sales_case_id);
+          }
+        });
+
+        const hasScopedCase = Array.from(relatedCaseIds).some((caseId) => filteredCaseIds.has(caseId));
+
+        if (!hasScopedCase) {
+          return sum;
+        }
+
+        const hasUnpaidLinkedPayout =
+          linkedPayoutIds.size === 0 ||
+          Array.from(linkedPayoutIds).some((payoutId) => payoutById.get(payoutId)?.payout_status !== "Paid");
+
+        if (!hasUnpaidLinkedPayout) {
+          return sum;
+        }
+
+        const grossAmount = Number(meta.grossAmount ?? entry.amount ?? 0);
+
+        if (!Number.isFinite(grossAmount)) {
+          return sum;
+        }
+
+        return sum + grossAmount;
+      }, 0);
+
+      return convertedDirect + convertedTopUp + convertedVoucher;
     },
-    [filteredCaseRows, memberProfileIds, payoutMap, payouts]
+    [entries, filteredCaseRows, memberProfileIds, payoutMap, payouts]
   );
 
   const totalMonthlyCaseCount = useMemo(() => filteredCaseRows.length, [filteredCaseRows]);
@@ -879,22 +963,15 @@ export function Dashboard({ role, rank, userId }: DashboardProps) {
     () =>
       memberTeamCaseRows.reduce((sum, record) => {
         const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
-        const allRelatedPayouts = payoutMap.get(record.id) ?? [];
-        const releasedHoldingPayouts = allRelatedPayouts.filter((payout) => isReleasedHoldingTopUp(payout));
+        const commissionStructure = getCaseCommissionStructure(record, project);
+        const totalCommissionPercentage =
+          (commissionStructure?.agent_commission ?? 0) +
+          (commissionStructure?.pre_leader_override ?? 0) +
+          (commissionStructure?.leader_override ?? 0);
 
-        return (
-          sum +
-          getCaseCommissionAmountForProfiles(record, project, profiles, teamMemberIds) +
-          releasedHoldingPayouts.reduce(
-            (releasedSum, payout) =>
-              teamMemberIds.has(payout.profile_id)
-                ? releasedSum + Number(payout.total_amount ?? 0)
-                : releasedSum,
-            0
-          )
-        );
+        return sum + (record.nett_price ?? 0) * (totalCommissionPercentage / 100);
       }, 0),
-    [memberTeamCaseRows, payoutMap, profiles, projectMap, teamMemberIds]
+    [memberTeamCaseRows, projectMap]
   );
 
   const totalTeamMonthlyConvertedCommission = useMemo(

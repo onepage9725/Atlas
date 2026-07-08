@@ -279,6 +279,27 @@ const parseVoucherHistoryMeta = (referenceDetail: string | null | undefined) => 
   }
 };
 
+const getPayoutIdFromComponentKey = (componentKey: string) => {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(componentKey)) {
+    return componentKey;
+  }
+
+  const uuidPrefixMatch = componentKey.match(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-/);
+
+  if (uuidPrefixMatch?.[1]) {
+    return uuidPrefixMatch[1];
+  }
+
+  const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+  const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
+
+  if (!matchedSuffix) {
+    return null;
+  }
+
+  return componentKey.slice(0, -matchedSuffix.length);
+};
+
 const deriveGrossAmountFromHistory = (finalAmount: number, referenceDetail: string | null | undefined) => {
   const historyMeta = parseVoucherHistoryMeta(referenceDetail);
 
@@ -537,14 +558,14 @@ export function PaymentVoucherPage({
     const nextPayouts = approvedPayoutResult.rows;
     const nextVoucherHistory = (voucherData as VoucherHistoryEntry[]) ?? [];
 
-    const { data: paidPayoutData, error: paidPayoutError } = await supabase
+    const { data: payoutDataNeedingReceipt, error: payoutDataNeedingReceiptError } = await supabase
       .from("sales_case_payouts")
       .select("id, payment_receipt_url")
       .in("payout_type", ["standard", "tier_upgrade_top_up"])
-      .eq("payout_status", "Paid")
+      .in("payout_status", ["Pending", "Approve", "Paid"])
       .is("payment_receipt_url", null);
 
-    if (!paidPayoutError && paidPayoutData) {
+    if (!payoutDataNeedingReceiptError && payoutDataNeedingReceipt) {
       const payoutUrlMap = new Map<string, string>();
       nextVoucherHistory.forEach((historyEntry) => {
         const meta = parseVoucherHistoryMeta(historyEntry.reference_detail);
@@ -559,9 +580,17 @@ export function PaymentVoucherPage({
             payoutUrlMap.set(payoutId, attachmentUrl);
           }
         });
+
+        (meta?.componentKeys ?? []).forEach((componentKey) => {
+          const payoutId = getPayoutIdFromComponentKey(componentKey);
+
+          if (payoutId) {
+            payoutUrlMap.set(payoutId, attachmentUrl);
+          }
+        });
       });
 
-      const missingRows = (paidPayoutData as Array<{ id: string; payment_receipt_url: string | null }>)
+      const missingRows = (payoutDataNeedingReceipt as Array<{ id: string; payment_receipt_url: string | null }>)
         .filter((row) => !row.payment_receipt_url && payoutUrlMap.has(row.id));
 
       if (missingRows.length > 0) {
@@ -1258,6 +1287,7 @@ export function PaymentVoucherPage({
       ).join("; ");
       const selectedMemberLabels = Array.from(new Set(selectedRows.map((row) => row.memberLabel)));
       const selectedComponentKeyList = Array.from(new Set(selectedRows.map((row) => row.id).filter(Boolean)));
+      const selectedPayoutIds = Array.from(new Set(selectedComponentRows.map(({ row }) => row.id).filter(Boolean)));
       const selectedSalesCaseIds = Array.from(new Set(selectedRows.map((row) => row.salesCaseId).filter(Boolean)));
       const selectedProfileIds = Array.from(new Set(selectedRows.map((row) => row.profileId).filter(Boolean)));
       const selectedCommissionLabels = Array.from(
@@ -1272,7 +1302,7 @@ export function PaymentVoucherPage({
       );
 
       const historyMetaPayload = JSON.stringify({
-        payoutIds: [],
+        payoutIds: selectedPayoutIds,
         componentKeys: selectedComponentKeyList,
         grossAmount: Number(selectedRows.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
         salesCaseIds: selectedSalesCaseIds,
@@ -1323,6 +1353,23 @@ export function PaymentVoucherPage({
       selectedComponentRows.forEach(({ row }) => {
         selectedByPayoutId.set(row.id, (selectedByPayoutId.get(row.id) ?? 0) + 1);
       });
+
+      const payoutIdsToAttachVoucher = Array.from(selectedByPayoutId.keys());
+
+      if (payoutIdsToAttachVoucher.length > 0) {
+        const { error: linkReceiptError } = await supabase
+          .from("sales_case_payouts")
+          .update({ payment_receipt_url: voucherUrl })
+          .in("id", payoutIdsToAttachVoucher);
+
+        if (linkReceiptError) {
+          setError(`Payment voucher generated, but unable to link payout receipts: ${linkReceiptError.message}`);
+          setIsGenerating(false);
+          setShowGenerateOptions(false);
+          await fetchData();
+          return;
+        }
+      }
 
       const payoutIdsToMarkPaid = Array.from(selectedByPayoutId.entries())
         .filter(([payoutId, selectedCount]) => {

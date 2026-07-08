@@ -50,6 +50,7 @@ type FinanceVoucherEntry = {
 
 type VoucherHistoryMeta = {
   grossAmount?: number;
+  payoutIds?: string[];
   profileIds?: string[];
   componentKeys?: string[];
   salesCaseIds?: string[];
@@ -132,6 +133,16 @@ const getVoucherReferenceBaseDetail = (referenceDetail: string | null | undefine
 };
 
 const getPayoutIdFromComponentKey = (componentKey: string) => {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(componentKey)) {
+    return componentKey;
+  }
+
+  const uuidPrefixMatch = componentKey.match(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-/);
+
+  if (uuidPrefixMatch?.[1]) {
+    return uuidPrefixMatch[1];
+  }
+
   const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
   const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
 
@@ -264,6 +275,12 @@ export function MyPaymentVoucherPage({
           return true;
         }
 
+        const hasPayoutIdMatch = (meta?.payoutIds ?? []).some((payoutId) => payoutIdSet.has(payoutId));
+
+        if (hasPayoutIdMatch) {
+          return true;
+        }
+
         return Boolean(entry.attachment_url && payoutReceiptUrls.has(entry.attachment_url));
       });
 
@@ -384,39 +401,13 @@ export function MyPaymentVoucherPage({
   const ownVoucherRows = useMemo<VoucherRow[]>(() => {
     if (voucherEntries.length > 0) {
       const payoutsById = new Map(payouts.map((payout) => [payout.id, payout]));
-      const payoutsByReceiptUrl = new Map<string, MemberVoucherPayoutRow[]>();
-
-      payouts.forEach((payout) => {
-        if (!payout.payment_receipt_url) {
-          return;
-        }
-
-        const rows = payoutsByReceiptUrl.get(payout.payment_receipt_url) ?? [];
-        rows.push(payout);
-        payoutsByReceiptUrl.set(payout.payment_receipt_url, rows);
-      });
 
       return voucherEntries.map((entry) => {
         const meta = parseVoucherHistoryMeta(entry.reference_detail);
         const voucherUrl = entry.attachment_url;
-        const payoutRowsFromComponents = (meta?.componentKeys ?? [])
-          .map((componentKey) => {
-            const payoutId = getPayoutIdFromComponentKey(componentKey);
-            return payoutId ? payoutsById.get(payoutId) ?? null : null;
-          })
-          .filter((payout): payout is MemberVoucherPayoutRow => Boolean(payout));
-        const payoutRowsFromReceipt = voucherUrl
-          ? payoutsByReceiptUrl.get(voucherUrl) ?? []
-          : [];
-        const resolvedPayoutRows = payoutRowsFromComponents.length > 0 ? payoutRowsFromComponents : payoutRowsFromReceipt;
-        const payoutLinkedAmount = Number(
-          resolvedPayoutRows.reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0).toFixed(2)
-        );
-        const amount = payoutLinkedAmount > 0
-          ? payoutLinkedAmount
-          : voucherUrl
-            ? voucherGrossAmountMap.get(voucherUrl) ?? deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail)
-            : deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+        const amount = voucherUrl
+          ? voucherGrossAmountMap.get(voucherUrl) ?? deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail)
+          : deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
 
         const metaSalesCaseIds = (meta?.salesCaseIds ?? []).filter(Boolean);
         const componentSalesCaseIds = (meta?.componentKeys ?? [])
@@ -453,7 +444,7 @@ export function MyPaymentVoucherPage({
     const groupedByVoucher = new Map<string, MemberVoucherPayoutRow[]>();
 
     payouts
-      .filter((payout) => payout.payout_status === "Paid")
+      .filter((payout) => payout.payout_status === "Paid" || Boolean(payout.payment_receipt_url))
       .forEach((payout) => {
         const voucherKey = payout.payment_receipt_url || `payout-${payout.id}`;
         const group = groupedByVoucher.get(voucherKey) ?? [];

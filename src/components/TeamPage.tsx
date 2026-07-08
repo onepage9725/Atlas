@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 import { getMemberRankSummary, type MemberRankSummary, type RankProfile } from "../lib/memberRanks";
+import { getCaseCommissionStructure } from "../lib/commissionStructures";
 import {
   getCaseCommissionAmountForProfiles,
   getCasePersonalAmountForProfiles,
@@ -1265,40 +1266,24 @@ export function TeamPage({ userId, role, rank }: TeamPageProps) {
 
   const totalDownlineSales = useMemo(
     () => {
-      const baseSales = filteredSummaryCaseRows.reduce((sum, row) => sum + row.totalCommission, 0);
-      const teamIdSet = new Set([userId, ...downlineIds]);
+      return filteredSummaryCaseRows.reduce((sum, row) => {
+        const relatedCase = cases.find((record) => record.id === row.id) ?? null;
 
-      const topUpSales = payouts
-        .filter((payout) => payout.payout_type === "tier_upgrade_top_up")
-        .filter((payout) => !isReleasedHoldingPayout(payout))
-        .filter((payout) => teamIdSet.has(payout.profile_id))
-        .reduce((sum, payout) => {
-          const relatedCase = cases.find((record) => record.id === payout.sales_case_id) ?? null;
+        if (!relatedCase) {
+          return sum;
+        }
 
-          if (!relatedCase) {
-            return sum;
-          }
+        const project = relatedCase.project_id ? projectMap.get(relatedCase.project_id) ?? null : null;
+        const commissionStructure = getCaseCommissionStructure(relatedCase, project);
+        const totalCommissionPercentage =
+          (commissionStructure?.agent_commission ?? 0) +
+          (commissionStructure?.pre_leader_override ?? 0) +
+          (commissionStructure?.leader_override ?? 0);
 
-          if (selectedMonth && getDateMonthValue(new Date(payout.created_at)) !== selectedMonth) {
-            return sum;
-          }
-
-          if (selectedProjectId !== "all" && relatedCase.project_id !== selectedProjectId) {
-            return sum;
-          }
-
-          const payoutDisplayStatus = payout.payout_status === "Paid" ? "Completed" : payout.payout_status;
-
-          if (statusFilter !== "all" && payoutDisplayStatus !== statusFilter) {
-            return sum;
-          }
-
-          return sum + Number(payout.total_amount ?? 0);
-        }, 0);
-
-      return baseSales + topUpSales;
+        return sum + (relatedCase.nett_price ?? 0) * (totalCommissionPercentage / 100);
+      }, 0);
     },
-    [cases, downlineIds, filteredSummaryCaseRows, payouts, selectedMonth, selectedProjectId, statusFilter, userId]
+    [cases, filteredSummaryCaseRows, projectMap]
   );
 
   const totalDownlineConverted = useMemo(

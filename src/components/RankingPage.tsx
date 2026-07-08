@@ -2,11 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Award, Medal, Trophy } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 import {
+  getCaseCommissionStructure,
+  getHoldingCommissionPercentage,
+} from "../lib/commissionStructures";
+import {
   getCaseCommissionAmountForProfile,
   getCaseCommissionAmountForProfiles,
   getCasePersonalAmountForProfile,
   getCasePersonalAmountForProfiles,
 } from "../lib/salesCaseMetrics";
+import { buildCommissionStructureByTotalPercentage } from "../lib/salesCasePayouts";
 import type { ProjectOption, SalesCasePayoutRecord, SalesCaseRecord } from "./SalesCaseModal";
 
 type RankingProfile = {
@@ -147,6 +152,48 @@ const isLeaderProfile = (profile: Pick<RankingProfile, "role" | "rank"> | null |
 
 const isPreLeaderProfile = (profile: Pick<RankingProfile, "rank"> | null | undefined) =>
   Boolean(profile && profile.rank === "pre_leader");
+
+const getLeaderChain = (
+  profile: RankingProfile | null,
+  profileMap: Map<string, RankingProfile>,
+  visitedIds = new Set<string>()
+) => {
+  if (!profile) {
+    return { preLeader: null, leader: null };
+  }
+
+  if (visitedIds.has(profile.id)) {
+    return { preLeader: null, leader: null };
+  }
+
+  const nextVisitedIds = new Set(visitedIds);
+  nextVisitedIds.add(profile.id);
+
+  if (profile.rank === "leader") {
+    return { preLeader: null, leader: profile };
+  }
+
+  const recruiter = profile.recruit_by ? profileMap.get(profile.recruit_by) ?? null : null;
+
+  if (!recruiter) {
+    return { preLeader: null, leader: null };
+  }
+
+  if (recruiter.rank === "leader") {
+    return { preLeader: null, leader: recruiter };
+  }
+
+  if (recruiter.rank === "pre_leader") {
+    const leader = recruiter.recruit_by ? profileMap.get(recruiter.recruit_by) ?? null : null;
+    return { preLeader: recruiter, leader };
+  }
+
+  if (recruiter.rank === "agent") {
+    return getLeaderChain(recruiter, profileMap, nextVisitedIds);
+  }
+
+  return { preLeader: null, leader: null };
+};
 
 const getAvatarStyle = (profile: Pick<RankingProfile, "avatar_url" | "avatar_position_x" | "avatar_position_y" | "avatar_zoom">) => ({
   backgroundImage: `url(${profile.avatar_url || DEFAULT_AVATAR_URL})`,
@@ -332,6 +379,104 @@ export function RankingPage({ userId }: RankingPageProps) {
     return map;
   }, [payouts]);
 
+  const memberProfileMap = useMemo(() => {
+    const map = new Map<string, RankingProfile>();
+    memberProfiles.forEach((profile) => map.set(profile.id, profile));
+    return map;
+  }, [memberProfiles]);
+
+  const getHoldingCommissionAmountForProfile = (
+    record: SalesCaseRecord,
+    profileId: string
+  ) => {
+    if (!profileId) {
+      return 0;
+    }
+
+    const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
+    const commissionStructure = getCaseCommissionStructure(record, project);
+    const holdingPercentage = getHoldingCommissionPercentage(commissionStructure);
+    const holdingCommissionStructure = commissionStructure
+      ? buildCommissionStructureByTotalPercentage(
+          commissionStructure,
+          holdingPercentage,
+          `${commissionStructure.id}-holding`,
+          commissionStructure.label,
+        )
+      : null;
+
+    if (!project || holdingPercentage <= 0 || !holdingCommissionStructure) {
+      return 0;
+    }
+
+    const viewerProfile = memberProfileMap.get(profileId) ?? null;
+    const creatorProfile = record.created_by ? memberProfileMap.get(record.created_by) ?? null : null;
+    const involvedProfileId =
+      (record.involved_profile_id && record.involved_profile_id !== record.created_by
+        ? record.involved_profile_id
+        : (record.involved_user_ids ?? []).filter((id) => id !== record.created_by)[0]) ?? null;
+    const involvedProfile = involvedProfileId ? memberProfileMap.get(involvedProfileId) ?? null : null;
+
+    if (!viewerProfile) {
+      return 0;
+    }
+
+    const participantIds = Array.from(new Set([record.created_by, involvedProfileId].filter(Boolean))) as string[];
+    const participants = [creatorProfile, involvedProfile].filter(
+      (profile, index, array): profile is RankingProfile =>
+        Boolean(profile) && array.findIndex((item) => item?.id === profile?.id) === index
+    );
+
+    if (participantIds.length === 0) {
+      return 0;
+    }
+
+    const splitAgentPercentage = (holdingCommissionStructure.agent_commission ?? 0) / participantIds.length;
+    const splitPreLeaderPercentage = (holdingCommissionStructure.pre_leader_override ?? 0) / participantIds.length;
+    const splitLeaderPercentage = (holdingCommissionStructure.leader_override ?? 0) / participantIds.length;
+    let totalPercentage = 0;
+
+    participants.forEach((participant) => {
+      const chain = getLeaderChain(participant, memberProfileMap);
+
+      if (participant.id === profileId) {
+        totalPercentage += splitAgentPercentage;
+      }
+
+      if (participant.rank === "agent") {
+        const preLeaderRecipient = chain.preLeader ?? chain.leader;
+
+        if (preLeaderRecipient?.id === profileId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+
+        if (chain.leader?.id === profileId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+
+        return;
+      }
+
+      if (participant.rank === "pre_leader") {
+        if (participant.id === profileId) {
+          totalPercentage += splitPreLeaderPercentage;
+        }
+
+        if (chain.leader?.id === profileId) {
+          totalPercentage += splitLeaderPercentage;
+        }
+
+        return;
+      }
+
+      if (participant.rank === "leader" && participant.id === profileId) {
+        totalPercentage += splitPreLeaderPercentage + splitLeaderPercentage;
+      }
+    });
+
+    return (record.nett_price ?? 0) * (totalPercentage / 100);
+  };
+
   const descendantIdsByProfile = useMemo(() => {
     const byRecruiter = new Map<string, RankingProfile[]>();
 
@@ -386,10 +531,21 @@ export function RankingPage({ userId }: RankingPageProps) {
         const project = record.project_id ? projectMap.get(record.project_id) ?? null : null;
         return sum + getCaseCommissionAmountForProfile(record, project, memberProfiles, profile.id);
       }, 0);
+      const personalHoldingSales = monthlyCases.reduce((sum, record) => {
+        const hasReleasedHoldingTopUp = (payoutsByCaseId.get(record.id) ?? []).some(
+          (payout) => payout.profile_id === profile.id && isReleasedHoldingPayout(payout)
+        );
+
+        if (hasReleasedHoldingTopUp) {
+          return sum;
+        }
+
+        return sum + getHoldingCommissionAmountForProfile(record, profile.id);
+      }, 0);
       const personalTopUpSales = monthlyTopUpPayouts
         .filter((payout) => payout.profile_id === profile.id)
         .reduce((sum, payout) => sum + Number(payout.total_amount ?? 0), 0);
-      const personalSales = personalDirectSales + personalTopUpSales;
+      const personalSales = personalDirectSales + personalHoldingSales + personalTopUpSales;
       const teamIds = new Set([profile.id, ...(descendantIdsByProfile.get(profile.id) ?? [])]);
       const teamGdv =
         rankCategory === "agent"
@@ -426,7 +582,7 @@ export function RankingPage({ userId }: RankingPageProps) {
         teamSales,
       };
     });
-  }, [descendantIdsByProfile, memberProfiles, monthlyCases, monthlyTopUpPayouts, payoutsByCaseId, projectMap]);
+  }, [descendantIdsByProfile, memberProfileMap, memberProfiles, monthlyCases, monthlyTopUpPayouts, payoutsByCaseId, projectMap]);
 
   const sortedRankingRows = useMemo(() => {
     return rankingRows
