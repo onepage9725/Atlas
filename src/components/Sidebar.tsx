@@ -19,6 +19,7 @@ interface SidebarProps {
   canViewPaymentVoucher: boolean;
   canViewMemberVoucher: boolean;
   canViewFinance: boolean;
+  canViewEInvoice: boolean;
   canViewUsers: boolean;
   isOpen: boolean;
   onClose: () => void;
@@ -67,6 +68,7 @@ export function Sidebar({
   canViewPaymentVoucher,
   canViewMemberVoucher,
   canViewFinance,
+  canViewEInvoice,
   canViewUsers,
   isOpen,
   onClose,
@@ -95,6 +97,7 @@ export function Sidebar({
     { name: "Payment Voucher", icon: FileText, isVisible: canViewPaymentVoucher },
     { name: "My Payment Voucher", icon: FileText, isVisible: canViewMemberVoucher },
     { name: "Finance", icon: DollarSign, isVisible: canViewFinance },
+    { name: "E-Invoice", icon: FileText, isVisible: canViewEInvoice },
     { name: "Projects", icon: Briefcase },
   ];
 
@@ -245,14 +248,14 @@ export function Sidebar({
           <button
             key={item.name}
             onClick={() => setActiveView(item.name)}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left text-sm font-medium transition-colors ${
               activeView === item.name
                 ? "bg-active text-primary"
                 : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
             }`}
           >
-            <item.icon className="h-5 w-5" />
-            {item.label ?? item.name}
+            <item.icon className="h-5 w-5 shrink-0" />
+            <span className="min-w-0 flex-1 text-left leading-6">{item.label ?? item.name}</span>
           </button>
         ))}
       </nav>

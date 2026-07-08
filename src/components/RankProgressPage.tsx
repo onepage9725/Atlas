@@ -27,7 +27,27 @@ type RelatedCaseRow = {
 };
 
 type ProgressPayout = RankPayout & {
+  id: string;
   paid_at: string | null;
+  payment_receipt_url: string | null;
+  rank?: string | null;
+  recruit_by?: string | null;
+  name?: string | null;
+  email?: string | null;
+  is_active?: boolean | null;
+  role?: string | null;
+};
+
+type PaymentVoucherFinanceEntry = {
+  amount: number;
+  attachment_url: string | null;
+  reference_detail: string | null;
+};
+
+type PaymentVoucherMeta = {
+  profileIds?: string[];
+  componentKeys?: string[];
+  grossAmount?: number;
 };
 
 const DEFAULT_AVATAR_URL = "https://api.dicebear.com/7.x/avataaars/svg?seed=Atlas";
@@ -121,6 +141,72 @@ const getNextRankTarget = (rank: MemberRank) => {
 };
 
 const rankOrder = new Map<MemberRank, number>(RANK_DISPLAY_ORDER.map((rank, index) => [rank, index]));
+const HISTORY_META_SEPARATOR = "|||META|||";
+
+const parsePaymentVoucherMeta = (referenceDetail: string | null | undefined) => {
+  const rawDetail = (referenceDetail ?? "").trim();
+  const [, metaPayload] = rawDetail.split(HISTORY_META_SEPARATOR);
+
+  if (!metaPayload) {
+    return null;
+  }
+
+  try {
+    const [metaJson] = metaPayload.split(" | ");
+    return JSON.parse(metaJson) as PaymentVoucherMeta;
+  } catch {
+    return null;
+  }
+};
+
+const deriveGrossAmountFromHistory = (finalAmount: number, referenceDetail: string | null | undefined) => {
+  const meta = parsePaymentVoucherMeta(referenceDetail);
+
+  if (meta?.grossAmount !== undefined && meta.grossAmount !== null) {
+    return Number(Number(meta.grossAmount).toFixed(2));
+  }
+
+  const normalizedDetail = (referenceDetail ?? "").toLowerCase();
+  const hasSst = normalizedDetail.includes("deduct sst 8%");
+  const hasWht =
+    normalizedDetail.includes("deduct wht 2%") ||
+    normalizedDetail.includes("deduct withholding tax 2%");
+
+  if (hasSst && hasWht) {
+    return Number(((finalAmount * 1.08) / 0.98).toFixed(2));
+  }
+
+  if (hasSst) {
+    return Number((finalAmount * 1.08).toFixed(2));
+  }
+
+  if (hasWht) {
+    return Number((finalAmount / 0.98).toFixed(2));
+  }
+
+  return Number(finalAmount.toFixed(2));
+};
+
+const getPayoutIdFromComponentKey = (componentKey: string) => {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(componentKey)) {
+    return componentKey;
+  }
+
+  const uuidPrefixMatch = componentKey.match(/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-/);
+
+  if (uuidPrefixMatch?.[1]) {
+    return uuidPrefixMatch[1];
+  }
+
+  const suffixes = ["-pre-leader-override", "-leader-override", "-comm"];
+  const matchedSuffix = suffixes.find((suffix) => componentKey.endsWith(suffix));
+
+  if (!matchedSuffix) {
+    return null;
+  }
+
+  return componentKey.slice(0, -matchedSuffix.length);
+};
 
 const isHigherRankAchieved = (summary: MemberRankSummary) => {
   const currentOrder = rankOrder.get(summary.rank) ?? Number.POSITIVE_INFINITY;
@@ -168,9 +254,11 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
   const [profiles, setProfiles] = useState<ProgressProfile[]>([]);
   const [rankCases, setRankCases] = useState<RankCase[]>([]);
   const [rankPayouts, setRankPayouts] = useState<ProgressPayout[]>([]);
+  const [paymentVoucherEntries, setPaymentVoucherEntries] = useState<PaymentVoucherFinanceEntry[]>([]);
   const [cases, setCases] = useState<SalesCaseRecord[]>([]);
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [selectedRank, setSelectedRank] = useState<"all" | MemberRank>("all");
+  const [selectedLeaderId, setSelectedLeaderId] = useState<string>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<SalesCaseRecord | null>(null);
@@ -186,7 +274,7 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
     const loadData = async () => {
       setError(null);
 
-      const [profileResult, rankCaseResult, payoutResult, caseResult, projectResult] = await Promise.all([
+      const [profileResult, rankCaseResult, payoutResult, caseResult, projectResult, paymentVoucherEntryResult] = await Promise.all([
         supabase
           .from("profiles")
           .select(
@@ -194,7 +282,7 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
           )
           .is("deleted_at", null),
         supabase.from("sales_cases").select("id, created_by, involved_user_ids, status"),
-        supabase.from("sales_case_payouts").select("sales_case_id, profile_id, payout_type, payout_status, total_amount, paid_at"),
+        supabase.from("sales_case_payouts").select("id, sales_case_id, profile_id, payout_type, payout_status, total_amount, paid_at, payment_receipt_url"),
         supabase.from("sales_cases").select("*").order("created_at", { ascending: false }),
         supabase
           .from("projects")
@@ -202,6 +290,10 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
             "id, project_name, company_commission, agent_commission, pre_leader_override, leader_override, commission_structures, default_commission_structure_id"
           )
           .eq("is_hidden", false),
+        supabase
+          .from("finance_entries")
+          .select("amount, attachment_url, reference_detail")
+          .eq("description", "Payment voucher generated"),
       ]);
 
       if (profileResult.error) {
@@ -229,9 +321,15 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
         return;
       }
 
+      if (paymentVoucherEntryResult.error) {
+        setError(paymentVoucherEntryResult.error.message);
+        return;
+      }
+
       setProfiles((profileResult.data as ProgressProfile[]) ?? []);
       setRankCases((rankCaseResult.data as RankCase[]) ?? []);
       setRankPayouts((payoutResult.data as ProgressPayout[]) ?? []);
+      setPaymentVoucherEntries((paymentVoucherEntryResult.data as PaymentVoucherFinanceEntry[]) ?? []);
       setCases((caseResult.data as SalesCaseRecord[]) ?? []);
       setProjects((projectResult.data as ProjectOption[]) ?? []);
     };
@@ -243,6 +341,175 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
     () => profiles.filter((profile) => (profile.is_active ?? true) && isMemberProfile(profile)),
     [profiles]
   );
+
+  const leaderProfiles = useMemo(
+    () => memberProfiles.filter((profile) => profile.role === "leader" || profile.rank === "leader"),
+    [memberProfiles]
+  );
+
+  const leaderHierarchyByLeaderId = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+
+    leaderProfiles.forEach((leader) => {
+      const hierarchyIds = new Set<string>([leader.id, ...Array.from(getDownlineProfileIds(leader.id, memberProfiles))]);
+      map.set(leader.id, hierarchyIds);
+    });
+
+    return map;
+  }, [leaderProfiles, memberProfiles]);
+
+  const voucherPersonalPointsByProfile = useMemo(() => {
+    const map = new Map<string, number>();
+    const payoutById = new Map(rankPayouts.map((payout) => [payout.id, payout]));
+    const payoutProfilesByReceiptUrl = new Map<string, Set<string>>();
+
+    rankPayouts.forEach((payout) => {
+      if (!payout.payment_receipt_url) {
+        return;
+      }
+
+      const ids = payoutProfilesByReceiptUrl.get(payout.payment_receipt_url) ?? new Set<string>();
+      ids.add(payout.profile_id);
+      payoutProfilesByReceiptUrl.set(payout.payment_receipt_url, ids);
+    });
+
+    const appendPoints = (profileId: string, amount: number) => {
+      map.set(profileId, Number(((map.get(profileId) ?? 0) + amount).toFixed(2)));
+    };
+
+    paymentVoucherEntries.forEach((entry) => {
+      const meta = parsePaymentVoucherMeta(entry.reference_detail);
+      const profileIds = new Set<string>((meta?.profileIds ?? []).filter(Boolean));
+
+      (meta?.componentKeys ?? []).forEach((componentKey) => {
+        const payoutId = getPayoutIdFromComponentKey(componentKey);
+        const profileId = payoutId ? payoutById.get(payoutId)?.profile_id : null;
+
+        if (profileId) {
+          profileIds.add(profileId);
+        }
+      });
+
+      if (profileIds.size === 0 && entry.attachment_url) {
+        (payoutProfilesByReceiptUrl.get(entry.attachment_url) ?? new Set<string>()).forEach((profileId) => {
+          profileIds.add(profileId);
+        });
+      }
+
+      const resolvedProfileIds = Array.from(profileIds);
+
+      if (resolvedProfileIds.length === 0) {
+        return;
+      }
+
+      const grossAmount = deriveGrossAmountFromHistory(entry.amount ?? 0, entry.reference_detail);
+      const shareAmount = Number((grossAmount / resolvedProfileIds.length).toFixed(2));
+
+      resolvedProfileIds.forEach((profileId) => appendPoints(profileId, shareAmount));
+    });
+
+    return map;
+  }, [paymentVoucherEntries, rankPayouts]);
+
+  const voucherGroupPointsByProfile = useMemo(() => {
+    const map = new Map<string, number>();
+    const profileById = new Map(memberProfiles.map((profile) => [profile.id, profile]));
+
+    const addGroupPoints = (profileId: string, amount: number) => {
+      map.set(profileId, Number(((map.get(profileId) ?? 0) + amount).toFixed(2)));
+    };
+
+    const getProgressRank = (profile: ProgressProfile) => {
+      if (profile.rank === "agent" || profile.rank === "pre_leader" || profile.rank === "leader") {
+        return profile.rank;
+      }
+
+      if (profile.role === "leader") {
+        return "leader";
+      }
+
+      if (profile.role === "agent") {
+        return "agent";
+      }
+
+      return null;
+    };
+
+    voucherPersonalPointsByProfile.forEach((amount, sourceProfileId) => {
+      const sourceProfile = profileById.get(sourceProfileId);
+
+      if (!sourceProfile || amount <= 0) {
+        return;
+      }
+
+      const sourceRank = getProgressRank(sourceProfile);
+
+      if (sourceRank !== "agent" && sourceRank !== "pre_leader" && sourceRank !== "leader") {
+        return;
+      }
+
+      if (sourceRank === "agent") {
+        let currentRecruiterId = sourceProfile.recruit_by;
+        const visited = new Set<string>();
+        let assignedPreLeader = false;
+        let assignedLeader = false;
+
+        while (currentRecruiterId && !visited.has(currentRecruiterId)) {
+          visited.add(currentRecruiterId);
+
+          const recruiter = profileById.get(currentRecruiterId);
+
+          if (!recruiter) {
+            break;
+          }
+
+          const recruiterRank = getProgressRank(recruiter);
+
+          if (recruiterRank === "pre_leader" && !assignedPreLeader) {
+            addGroupPoints(recruiter.id, amount);
+            assignedPreLeader = true;
+          }
+
+          if (recruiterRank === "leader" && !assignedLeader) {
+            addGroupPoints(recruiter.id, amount);
+            assignedLeader = true;
+          }
+
+          if (assignedPreLeader && assignedLeader) {
+            break;
+          }
+
+          currentRecruiterId = recruiter.recruit_by;
+        }
+      }
+
+      if (sourceRank === "pre_leader" || sourceRank === "leader") {
+        addGroupPoints(sourceProfile.id, amount);
+
+        let currentRecruiterId = sourceProfile.recruit_by;
+        const visited = new Set<string>();
+
+        while (currentRecruiterId && !visited.has(currentRecruiterId)) {
+          visited.add(currentRecruiterId);
+
+          const recruiter = profileById.get(currentRecruiterId);
+
+          if (!recruiter) {
+            break;
+          }
+
+          if (getProgressRank(recruiter) === "leader") {
+            addGroupPoints(recruiter.id, amount);
+            break;
+          }
+
+          currentRecruiterId = recruiter.recruit_by;
+        }
+      }
+    });
+
+    return map;
+  }, [memberProfiles, voucherPersonalPointsByProfile]);
 
   const memberRankSummaries = useMemo(() => {
     const map = new Map<string, MemberRankSummary>();
@@ -265,6 +532,14 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
           return false;
         }
 
+        if (selectedLeaderId !== "all") {
+          const hierarchyIds = leaderHierarchyByLeaderId.get(selectedLeaderId) ?? null;
+
+          if (!hierarchyIds || !hierarchyIds.has(profile.id)) {
+            return false;
+          }
+        }
+
         if (!normalizedSearch) {
           return true;
         }
@@ -285,7 +560,7 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
         const rightName = (right.name || right.email || "").toLowerCase();
         return leftName.localeCompare(rightName);
       });
-  }, [memberProfiles, memberRankSummaries, searchTerm, selectedRank]);
+  }, [leaderHierarchyByLeaderId, memberProfiles, memberRankSummaries, searchTerm, selectedLeaderId, selectedRank]);
 
   const selectedProfile = useMemo(
     () => filteredProfiles.find((profile) => profile.id === selectedProfileId) ?? memberProfiles.find((profile) => profile.id === selectedProfileId) ?? null,
@@ -390,7 +665,7 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
             Review each member&apos;s progress toward the next rank, with leader rows shown first.
           </p>
         </div>
-        <div className="grid w-full grid-cols-1 gap-3 md:w-auto md:grid-cols-2">
+        <div className="grid w-full grid-cols-1 gap-3 md:w-auto md:grid-cols-3">
           <div className="md:min-w-[180px]">
             <label className="mb-1 block text-xs font-medium text-gray-700">Filter by Rank</label>
             <select
@@ -403,6 +678,23 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
                   {option.label}
                 </option>
               ))}
+            </select>
+          </div>
+          <div className="md:min-w-[220px]">
+            <label className="mb-1 block text-xs font-medium text-gray-700">Filter by Leader</label>
+            <select
+              value={selectedLeaderId}
+              onChange={(event) => setSelectedLeaderId(event.target.value)}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+            >
+              <option value="all">All Leaders</option>
+              {leaderProfiles
+                .sort((left, right) => (left.name || left.email || "").localeCompare(right.name || right.email || ""))
+                .map((leader) => (
+                  <option key={leader.id} value={leader.id}>
+                    {leader.name || leader.email || "Unnamed leader"}
+                  </option>
+                ))}
             </select>
           </div>
           <div className="md:min-w-[260px]">
@@ -472,9 +764,9 @@ export function RankProgressPage({ role, userId }: RankProgressPageProps) {
 
                   {target.requirements.map((requirement) => {
                     const currentValue = requirement.key === "personal"
-                      ? summary?.personalPoints ?? 0
+                      ? (summary?.personalPoints ?? 0) + (voucherPersonalPointsByProfile.get(profile.id) ?? 0)
                       : requirement.key === "group"
-                        ? summary?.groupPoints ?? 0
+                        ? (summary?.groupPoints ?? 0) + (voucherGroupPointsByProfile.get(profile.id) ?? 0)
                         : summary?.directRecruitCount ?? 0;
                     const progress = Math.min((currentValue / requirement.target) * 100, 100);
 

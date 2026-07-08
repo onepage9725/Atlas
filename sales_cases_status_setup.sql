@@ -561,6 +561,91 @@ create table if not exists public.notifications (
   constraint notifications_target_view_check check (target_view in ('Dashboard', 'Manage Cases', 'Sales Cases'))
 );
 
+create table if not exists public.e_invoices (
+  id uuid primary key default gen_random_uuid(),
+  invoice_number text not null,
+  invoice_date date not null,
+  bill_to text not null,
+  tax_rate numeric not null default 8,
+  line_items jsonb not null default '[]'::jsonb,
+  created_by uuid references public.profiles(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists e_invoices_invoice_date_idx
+  on public.e_invoices (invoice_date desc);
+
+create unique index if not exists e_invoices_invoice_number_idx
+  on public.e_invoices (invoice_number);
+
+alter table public.e_invoices enable row level security;
+
+drop policy if exists e_invoices_select_super_admin on public.e_invoices;
+create policy e_invoices_select_super_admin
+on public.e_invoices
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.profiles
+    where profiles.id = auth.uid()
+      and profiles.role = 'super_admin'
+  )
+);
+
+drop policy if exists e_invoices_insert_super_admin on public.e_invoices;
+create policy e_invoices_insert_super_admin
+on public.e_invoices
+for insert
+to authenticated
+with check (
+  exists (
+    select 1
+    from public.profiles
+    where profiles.id = auth.uid()
+      and profiles.role = 'super_admin'
+  )
+  and created_by = auth.uid()
+);
+
+drop policy if exists e_invoices_update_super_admin on public.e_invoices;
+create policy e_invoices_update_super_admin
+on public.e_invoices
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.profiles
+    where profiles.id = auth.uid()
+      and profiles.role = 'super_admin'
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.profiles
+    where profiles.id = auth.uid()
+      and profiles.role = 'super_admin'
+  )
+);
+
+drop policy if exists e_invoices_delete_super_admin on public.e_invoices;
+create policy e_invoices_delete_super_admin
+on public.e_invoices
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.profiles
+    where profiles.id = auth.uid()
+      and profiles.role = 'super_admin'
+  )
+);
+
 alter table public.notifications
   drop constraint if exists notifications_target_view_check;
 
@@ -580,7 +665,7 @@ security definer
 set search_path = public
 as $$
   delete from public.notifications
-  where created_at < now() - interval '7 days';
+  where created_at < now() - interval '5 days';
 $$;
 
 do $cleanup_notifications_schedule$
@@ -626,6 +711,13 @@ for update
 to authenticated
 using (recipient_id = auth.uid())
 with check (recipient_id = auth.uid());
+
+drop policy if exists notifications_delete_recipient on public.notifications;
+create policy notifications_delete_recipient
+on public.notifications
+for delete
+to authenticated
+using (recipient_id = auth.uid());
 
 drop function if exists public.get_ranking_profiles();
 

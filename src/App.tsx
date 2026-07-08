@@ -9,6 +9,7 @@ import { SalesCasesForm } from "./components/SalesCasesForm";
 import { ManageCases } from "./components/ManageCases";
 import { CommReviewPage } from "./components/CommReviewPage";
 import { FinancePage } from "./components/FinancePage";
+import { EInvoicePage } from "./components/EInvoicePage";
 import { PayoutPage } from "./components/PayoutPage";
 import { PaymentVoucherPage } from "./components/PaymentVoucherPage";
 import { MyPaymentVoucherPage } from "./components/MyPaymentVoucherPage";
@@ -21,6 +22,20 @@ import { supabase } from "./lib/supabaseClient";
 
 const normalizeAccessValue = (value: string | null) =>
   value?.trim().toLowerCase().replace(/\s+/g, "_") ?? null;
+
+const isSessionError = (message: string | undefined) => {
+  if (!message) {
+    return false;
+  }
+
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("refresh token") ||
+    normalized.includes("jwt") ||
+    normalized.includes("invalid token") ||
+    normalized.includes("auth session")
+  );
+};
 
 function App() {
   const [activeView, setActiveView] = useState("Dashboard");
@@ -37,19 +52,62 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isProfileLoading, setIsProfileLoading] = useState(false);
 
+  const clearSessionState = () => {
+    setSessionEmail(null);
+    setSessionUserId(null);
+    setProfileRole(null);
+    setProfileRank(null);
+    setProfileName(null);
+    setProfileAvatarUrl(null);
+    setProfileAvatarX(null);
+    setProfileAvatarY(null);
+    setProfileAvatarZoom(null);
+    setActiveView("Dashboard");
+  };
+
   useEffect(() => {
     const loadSession = async () => {
-      const { data } = await supabase.auth.getSession();
-      setSessionEmail(data.session?.user.email ?? null);
-      setSessionUserId(data.session?.user.id ?? null);
+      const { data, error } = await supabase.auth.getSession();
+
+      if (error && isSessionError(error.message)) {
+        await supabase.auth.signOut({ scope: "local" });
+        clearSessionState();
+        setIsLoading(false);
+        return;
+      }
+
+      const nextSession = data.session;
+
+      if (!nextSession) {
+        clearSessionState();
+        setIsLoading(false);
+        return;
+      }
+
+      const { data: userResult, error: userError } = await supabase.auth.getUser();
+
+      if (userError || !userResult.user) {
+        await supabase.auth.signOut({ scope: "local" });
+        clearSessionState();
+        setIsLoading(false);
+        return;
+      }
+
+      setSessionEmail(nextSession.user.email ?? null);
+      setSessionUserId(nextSession.user.id ?? null);
       setIsLoading(false);
     };
 
     loadSession();
 
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSessionEmail(session?.user.email ?? null);
-      setSessionUserId(session?.user.id ?? null);
+      if (!session) {
+        clearSessionState();
+        return;
+      }
+
+      setSessionEmail(session.user.email ?? null);
+      setSessionUserId(session.user.id ?? null);
     });
 
     return () => {
@@ -61,13 +119,7 @@ function App() {
     const loadProfile = async () => {
       if (!sessionUserId) {
         setIsProfileLoading(false);
-        setProfileRole(null);
-        setProfileRank(null);
-        setProfileName(null);
-        setProfileAvatarUrl(null);
-        setProfileAvatarX(null);
-        setProfileAvatarY(null);
-        setProfileAvatarZoom(null);
+        clearSessionState();
         return;
       }
 
@@ -80,13 +132,18 @@ function App() {
         .single();
 
       if (error) {
-        setProfileRole(null);
-        setProfileRank(null);
-        setProfileName(null);
-        setProfileAvatarUrl(null);
-        setProfileAvatarX(null);
-        setProfileAvatarY(null);
-        setProfileAvatarZoom(null);
+        if (isSessionError(error.message)) {
+          await supabase.auth.signOut({ scope: "local" });
+          clearSessionState();
+        } else {
+          setProfileRole(null);
+          setProfileRank(null);
+          setProfileName(null);
+          setProfileAvatarUrl(null);
+          setProfileAvatarX(null);
+          setProfileAvatarY(null);
+          setProfileAvatarZoom(null);
+        }
         setIsProfileLoading(false);
         return;
       }
@@ -103,7 +160,7 @@ function App() {
         setProfileAvatarZoom(null);
         setActiveView("Dashboard");
         setIsProfileLoading(false);
-        await supabase.auth.signOut();
+        await supabase.auth.signOut({ scope: "local" });
         return;
       }
 
@@ -162,6 +219,7 @@ function App() {
   const canViewPayout = isSuperAdmin;
   const canViewPaymentVoucher = isSuperAdmin || isAdmin;
   const canViewFinance = isSuperAdmin;
+  const canViewEInvoice = isSuperAdmin;
   const canViewSalesCases = !isSuperAdmin && !isAdmin && isMemberAccount;
   const canViewTeam = isMemberAccount;
   const canViewRanking = isMemberAccount || isAdmin || isSuperAdmin;
@@ -207,6 +265,7 @@ function App() {
         canViewPaymentVoucher={canViewPaymentVoucher}
         canViewMemberVoucher={canViewMemberVoucher}
         canViewFinance={canViewFinance}
+        canViewEInvoice={canViewEInvoice}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
       />
@@ -386,6 +445,24 @@ function App() {
           (canViewFinance ? (
             sessionUserId ? (
               <FinancePage userId={sessionUserId} role={profileRole} />
+            ) : (
+              <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
+                <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
+                  Missing user session.
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
+              <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">
+                You do not have permission to access this section.
+              </div>
+            </div>
+          ))}
+        {activeView === "E-Invoice" &&
+          (canViewEInvoice ? (
+            sessionUserId ? (
+              <EInvoicePage userId={sessionUserId} />
             ) : (
               <div className="px-4 pb-8 pt-20 md:ml-[220px] md:w-[calc(100%-220px)] md:px-8 md:pb-12 md:pt-24">
                 <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-sm text-gray-600">

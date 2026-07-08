@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { jsPDF } from "jspdf";
+import { notifyPaymentVoucherGenerated } from "../lib/notifications";
 import { supabase } from "../lib/supabaseClient";
 import { SalesCaseModal, type ProjectOption, type SalesCasePayoutRecord, type SalesCaseRecord } from "./SalesCaseModal";
 
@@ -1408,6 +1409,18 @@ export function PaymentVoucherPage({
         setShowGenerateOptions(false);
         await fetchData();
         return;
+      }
+
+      try {
+        await notifyPaymentVoucherGenerated({
+          actorUserId: userId,
+          recipientIds: selectedProfileIds,
+          salesCaseId: selectedSalesCaseIds[0] ?? null,
+          details: selectedDetails,
+          grossAmount: Number(selectedRows.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
+        });
+      } catch (notificationError) {
+        console.error("Failed to create notifications for generated payment voucher", notificationError);
       }
 
       await fetchData();

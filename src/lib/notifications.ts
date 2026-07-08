@@ -275,6 +275,42 @@ export const notifyPayoutPaid = async ({
   ]);
 };
 
+export const notifyPaymentVoucherGenerated = async ({
+  actorUserId,
+  recipientIds,
+  salesCaseId,
+  details,
+  grossAmount,
+}: {
+  actorUserId: string;
+  recipientIds: string[];
+  salesCaseId: string | null;
+  details: string;
+  grossAmount: number;
+}) => {
+  const uniqueRecipientIds = Array.from(new Set(recipientIds.filter(Boolean))).filter(
+    (recipientId) => recipientId !== actorUserId
+  );
+
+  if (uniqueRecipientIds.length === 0) {
+    return;
+  }
+
+  const detailsLabel = details || "the related sales case";
+  const amountLabel = formatCurrency(grossAmount);
+
+  await insertNotificationRows(
+    uniqueRecipientIds.map((recipientId) => ({
+      recipient_id: recipientId,
+      sales_case_id: salesCaseId,
+      title: "Payment voucher generated",
+      message: `A payment voucher has been generated for ${detailsLabel}. Amount: ${amountLabel}.`,
+      target_view: "Sales Cases" as NotificationTargetView,
+      created_by: actorUserId,
+    }))
+  );
+};
+
 export const notifyEventCreated = async ({
   actorUserId,
   eventName,

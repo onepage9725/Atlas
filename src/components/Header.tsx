@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bell, LogOut, Menu } from "lucide-react";
+import { Bell, LogOut, Menu, X } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 import type { AppNotification, NotificationTargetView } from "../lib/notifications";
+import { useLanguage } from "../lib/language";
 
 interface HeaderProps {
   pageTitle: string;
@@ -32,6 +33,7 @@ export function Header({
   onSignOut,
   onMenuClick,
 }: HeaderProps) {
+  const { language, toggleLanguage } = useLanguage();
   const displayName = userName || userEmail;
   const posX = avatarPositionX ?? 50;
   const posY = avatarPositionY ?? 50;
@@ -49,6 +51,15 @@ export function Header({
     let isMounted = true;
 
     const loadNotifications = async () => {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - 5);
+
+      await supabase
+        .from("notifications")
+        .delete()
+        .eq("recipient_id", userId)
+        .lt("created_at", cutoffDate.toISOString());
+
       const { data, error } = await supabase
         .from("notifications")
         .select("id, sales_case_id, title, message, target_view, is_read, created_at")
@@ -127,6 +138,20 @@ export function Header({
     onNotificationClick(notification.target_view);
   };
 
+  const handleNotificationDelete = async (notificationId: string) => {
+    const { error } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("id", notificationId)
+      .eq("recipient_id", userId);
+
+    if (error) {
+      return;
+    }
+
+    setNotifications((current) => current.filter((item) => item.id !== notificationId));
+  };
+
   return (
     <header className="fixed left-0 right-0 top-0 z-20 flex h-16 items-center justify-between border-b border-gray-100 bg-white px-4 md:left-[220px] md:px-8">
       <div className="flex items-center gap-4">
@@ -176,26 +201,55 @@ export function Header({
                   <div className="px-4 py-6 text-sm text-gray-500">No notifications yet.</div>
                 ) : (
                   notifications.map((notification) => (
-                    <button
+                    <div
                       key={notification.id}
-                      type="button"
-                      onClick={() => void handleNotificationSelect(notification)}
-                      className={`w-full border-b border-gray-100 px-4 py-3 text-left transition hover:bg-gray-50 ${
+                      className={`border-b border-gray-100 px-4 py-3 transition hover:bg-gray-50 ${
                         notification.is_read ? "bg-white" : "bg-blue-50/40"
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <p className="text-sm font-medium text-gray-900">{notification.title}</p>
-                        <span className="shrink-0 text-[11px] text-gray-400">{formatNotificationDate(notification.created_at)}</span>
+                      <div className="mb-1 flex items-start justify-between gap-3">
+                        <button
+                          type="button"
+                          onClick={() => void handleNotificationSelect(notification)}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <p className="text-sm font-medium text-gray-900">{notification.title}</p>
+                        </button>
+                        <div className="flex items-center gap-2">
+                          <span className="shrink-0 text-[11px] text-gray-400">{formatNotificationDate(notification.created_at)}</span>
+                          <button
+                            type="button"
+                            onClick={() => void handleNotificationDelete(notification.id)}
+                            className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                            aria-label="Delete notification"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
-                      <p className="mt-1 text-xs leading-5 text-gray-500">{notification.message}</p>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleNotificationSelect(notification)}
+                        className="w-full text-left"
+                      >
+                        <p className="text-xs leading-5 text-gray-500">{notification.message}</p>
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
             </div>
           )}
         </div>
+        <button
+          type="button"
+          onClick={toggleLanguage}
+          className="inline-flex h-8 items-center justify-center rounded-full border border-gray-200 px-2 text-sm hover:bg-gray-50"
+          title={language === "en" ? "Switch to Chinese" : "切换到英文"}
+          aria-label={language === "en" ? "Switch to Chinese" : "切换到英文"}
+        >
+          {language === "en" ? "🌐" : "🀄"}
+        </button>
         <button
           type="button"
           onClick={onProfileClick}
