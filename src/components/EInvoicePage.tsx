@@ -325,6 +325,7 @@ export function EInvoicePage({ userId }: EInvoicePageProps) {
                 <th className="px-4 py-2">Bill To</th>
                 <th className="px-4 py-2">Items</th>
                 <th className="px-4 py-2">Total Include SST (RM)</th>
+                <th className="px-4 py-2 text-center">Download</th>
                 <th className="px-4 py-2 text-right">Action</th>
               </tr>
             </thead>
@@ -343,6 +344,14 @@ export function EInvoicePage({ userId }: EInvoicePageProps) {
                     <td className="px-4 py-3 text-gray-700">{record.bill_to}</td>
                     <td className="px-4 py-3 text-gray-700">{lineItems.length}</td>
                     <td className="px-4 py-3 text-gray-700">RM {formatAmount(totalInclude)}</td>
+                    <td className="px-4 py-3 text-center">
+                      <button
+                        type="button"
+                        className="inline-flex items-center rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-700 hover:text-gray-900"
+                      >
+                        Download
+                      </button>
+                    </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-2">
                         <button
@@ -378,7 +387,7 @@ export function EInvoicePage({ userId }: EInvoicePageProps) {
 
               {records.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-6 text-center text-gray-500">
+                  <td colSpan={7} className="py-6 text-center text-gray-500">
                     No e-invoice rows found.
                   </td>
                 </tr>
